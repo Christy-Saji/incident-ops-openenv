@@ -1,0 +1,118 @@
+name: devops_incident_triage_env
+description: >
+  A realistic OpenEnv benchmark for SaaS production incident response.
+  Agents investigate alerts, inspect evidence, apply mitigations, communicate status,
+  and resolve incidents through a typed step/reset/state interface.
+
+version: "2.0"
+
+actions:
+  - name: acknowledge_incident
+    description: Claim ownership of the incident and begin coordinated response.
+  - name: inspect_auth_logs
+    description: Review auth-service logs for root-cause evidence.
+  - name: inspect_db_metrics
+    description: Inspect database saturation metrics and connection pressure.
+  - name: inspect_deploy_history
+    description: Review the latest production deploy history and runbook clues.
+  - name: rollback_auth_deploy
+    description: Roll back the latest auth deploy if it is the root cause.
+  - name: restart_auth_service
+    description: Restart the auth service; sometimes noisy if the deploy is still bad.
+  - name: scale_db_cluster
+    description: Add database capacity to mitigate saturation.
+  - name: flush_cache
+    description: Flush or warm the cache to reduce stale-session pressure.
+  - name: shift_traffic_canary
+    description: Shift traffic away from the hottest shard or degraded path.
+  - name: post_status_update
+    description: Publish a customer-facing incident update with mitigation progress.
+  - name: resolve_incident
+    description: Mark the incident resolved once service health and communication are complete.
+  - name: no_op
+    description: Do nothing; penalized because incidents require action.
+
+observation_space:
+  task:
+    type: str
+  incident_title:
+    type: str
+  customer_impact:
+    type: str
+  incident_phase:
+    type: str
+    values: [investigating, monitoring, resolved]
+  active_alerts:
+    type: list
+    items: str
+  service_status:
+    type: dict
+    keys: [auth, api, db, cache]
+    values: [running, degraded]
+  metrics:
+    type: dict
+    keys: [cpu_usage, memory_usage, latency_ms, error_rate, request_rate]
+    values: int
+  known_findings:
+    type: list
+    items: str
+  communication_log:
+    type: list
+    items: str
+  recent_actions:
+    type: list
+    items: str
+  available_actions:
+    type: list
+    items: str
+
+reward:
+  range: [-0.25, 1]
+  description: >
+    Per-step reward equals positive score improvement only. The underlying task score combines
+    diagnosis, mitigation quality, system recovery, communication, and efficiency with task-specific weights.
+
+tasks:
+  - name: easy
+    description: Auth deploy regression affecting login flows.
+    expected_steps: 4
+  - name: medium
+    description: Database saturation caused by a traffic spike.
+    expected_steps: 6
+  - name: hard
+    description: Cascading multi-service outage triggered by a bad auth deploy.
+    expected_steps: 9
+
+graders:
+  deterministic: true
+  score_range: [0.0, 1.0]
+  criteria:
+    - diagnosis quality
+    - mitigation completion
+    - recovery quality
+    - communication quality
+    - efficiency
+
+interface:
+  reset: Returns the initial typed observation for the selected task.
+  step: "step(action) -> (observation, reward, done, info)"
+  state: Returns the current observation snapshot.
+
+server:
+  routes:
+    - POST /reset
+    - POST /step
+    - GET /state
+    - GET /health
+
+inference:
+  env_vars:
+    - API_BASE_URL
+    - MODEL_NAME
+    - HF_TOKEN
+    - OPENAI_API_KEY
+    - API_KEY
+  output_format:
+    - "[START] task=<name> env=devops model=<model>"
+    - "[STEP] step=<n> action=<action> reward=<r> done=<bool> error=<err>"
+    - "[END] success=<bool> steps=<n> score=<s> rewards=<csv>"
