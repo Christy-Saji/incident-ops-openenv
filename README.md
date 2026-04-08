@@ -1,3 +1,13 @@
+---
+title: Incident Ops OpenEnv
+emoji: "🚨"
+colorFrom: red
+colorTo: blue
+sdk: docker
+app_file: app.py
+pinned: false
+---
+
 # DevOps Incident Triage OpenEnv
 
 An OpenEnv benchmark for real-world SaaS incident response. The agent acts like an on-call SRE:
