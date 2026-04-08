@@ -29,9 +29,9 @@ def health() -> dict:
 
 
 @app.post("/reset")
-def reset(request: ResetRequest) -> dict:
+def reset(request: ResetRequest | None = None) -> dict:
     global current_env
-    task_name = request.task or "easy"
+    task_name = (request.task if request else None) or "easy"
     if task_name not in TASK_CONFIGS:
         raise HTTPException(status_code=400, detail=f"Unknown task '{task_name}'")
     current_env = DevOpsEnv(task=task_name)
