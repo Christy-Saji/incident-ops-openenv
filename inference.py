@@ -235,8 +235,8 @@ def run_task(task_name: str, client: OpenAI | None, model: str | None) -> tuple[
 
 
 if __name__ == "__main__":
-    api_base = os.environ.get("API_BASE_URL")
-    model_name = os.environ.get("MODEL_NAME")
+    api_base = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+    model_name = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
     api_key = (
         os.environ.get("OPENAI_API_KEY")
         or os.environ.get("API_KEY")
