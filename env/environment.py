@@ -15,6 +15,7 @@ class DevOpsEnv:
         self.current_step = 0
         self._state: Dict = {}
         self._last_action: str = ""
+        self.reset()
 
     def reset(self) -> Dict:
         config = TASK_CONFIGS.get(self.task)

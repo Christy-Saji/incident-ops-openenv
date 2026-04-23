@@ -52,15 +52,16 @@ def compute_breakdown(task_name: str, state: Dict) -> Dict[str, float]:
     config = TASK_CONFIGS[task_name]
     max_steps = config["max_steps"]
 
-    diagnosis_done = sum(1 for action in config["required_diagnostics"] if action in state["actions_taken"])
-    mitigation_done = sum(1 for action in config["required_mitigations"] if action in state["actions_taken"])
-    good_followups_done = sum(1 for action in config["good_followups"] if action in state["actions_taken"])
+    actions_taken = state.get("actions_taken", [])
+    diagnosis_done = sum(1 for action in config["required_diagnostics"] if action in actions_taken)
+    mitigation_done = sum(1 for action in config["required_mitigations"] if action in actions_taken)
+    good_followups_done = sum(1 for action in config["good_followups"] if action in actions_taken)
 
     diagnosis = diagnosis_done / len(config["required_diagnostics"])
     mitigation = mitigation_done / len(config["required_mitigations"])
     recovery = _recovery_score(state)
     communication = good_followups_done / len(config["good_followups"])
-    efficiency = max(0.0, min(1.0, 1 - (state["step_count"] / max_steps)))
+    efficiency = max(0.0, min(1.0, 1 - (state.get("step_count", 0) / max_steps)))
 
     if not state["resolved"]:
         efficiency *= 0.5
