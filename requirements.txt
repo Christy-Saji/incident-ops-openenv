@@ -3,3 +3,7 @@ pydantic
 pyyaml
 fastapi
 uvicorn
+trl
+unsloth
+torch
+datasets
