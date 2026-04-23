@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>DevOps Incident Triage — OpenEnv</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root{
+    --bg:#0d0f14;--surface:#161b27;--surface2:#1e2535;--border:#2a3347;
+    --accent:#6366f1;--accent2:#8b5cf6;--green:#22c55e;--red:#ef4444;
+    --yellow:#f59e0b;--text:#e2e8f0;--muted:#64748b;--mono:'JetBrains Mono',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;min-height:100vh}
+
+  /* ── header ── */
+  header{background:linear-gradient(135deg,#1e1b4b,#312e81,#1e1b4b);padding:18px 32px;display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--border)}
+  header h1{font-size:1.25rem;font-weight:700;background:linear-gradient(90deg,#a5b4fc,#c4b5fd);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .badge{background:#312e81;color:#a5b4fc;padding:3px 10px;border-radius:999px;font-size:.7rem;font-weight:600;letter-spacing:.05em}
+
+  /* ── layout ── */
+  .app{display:grid;grid-template-columns:300px 1fr;gap:0;height:calc(100vh - 61px)}
+  .sidebar{background:var(--surface);border-right:1px solid var(--border);padding:20px;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
+  .main{display:flex;flex-direction:column;overflow:hidden}
+
+  /* ── control panel ── */
+  .section-label{font-size:.65rem;font-weight:600;letter-spacing:.12em;color:var(--muted);text-transform:uppercase;margin-bottom:6px}
+  select,button{width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--border);font-family:inherit;font-size:.85rem;cursor:pointer;transition:all .15s}
+  select{background:var(--surface2);color:var(--text)}
+  select:focus{outline:none;border-color:var(--accent)}
+  .btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none;font-weight:600}
+  .btn-primary:hover{opacity:.9;transform:translateY(-1px)}
+  .btn-primary:active{transform:translateY(0)}
+  .btn-secondary{background:var(--surface2);color:var(--text);border-color:var(--border)}
+  .btn-secondary:hover{border-color:var(--accent);color:var(--accent)}
+  .btn-demo{background:linear-gradient(135deg,#065f46,#047857);color:#fff;border:none;font-weight:600}
+  .btn-demo:hover{opacity:.9}
+  .toggle-row{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;background:var(--surface2);border-radius:8px;border:1px solid var(--border)}
+  .toggle-row label{font-size:.8rem;color:var(--text)}
+  input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+
+  /* ── metrics bar ── */
+  .metrics-bar{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;gap:24px;flex-wrap:wrap}
+  .metric{display:flex;flex-direction:column;gap:2px}
+  .metric-label{font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+  .metric-value{font-family:var(--mono);font-size:.95rem;font-weight:600}
+  .metric-value.ok{color:var(--green)}
+  .metric-value.warn{color:var(--yellow)}
+  .metric-value.crit{color:var(--red)}
+
+  /* ── phase pill ── */
+  .phase{padding:3px 12px;border-radius:999px;font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em}
+  .phase.investigating{background:#451a03;color:#fed7aa}
+  .phase.monitoring{background:#1c1917;color:#f59e0b}
+  .phase.resolved{background:#052e16;color:#86efac}
+
+  /* ── content area ── */
+  .content{flex:1;overflow-y:auto;padding:20px 24px;display:flex;flex-direction:column;gap:16px}
+
+  /* ── incident card ── */
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px}
+  .card-title{font-size:.75rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px}
+  .incident-title{font-size:1.05rem;font-weight:700;margin-bottom:6px;color:#c7d2fe}
+  .impact-text{font-size:.85rem;color:var(--muted);line-height:1.5}
+  .alerts-list{display:flex;flex-direction:column;gap:6px}
+  .alert-item{background:#2d1515;border:1px solid #7f1d1d;color:#fca5a5;padding:7px 12px;border-radius:6px;font-size:.8rem;font-family:var(--mono);display:flex;gap:8px;align-items:center}
+  .alert-item::before{content:"🔴";font-size:.75rem}
+
+  /* ── service status grid ── */
+  .services{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+  .service-item{background:var(--surface2);border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;font-size:.82rem}
+  .service-name{font-family:var(--mono);font-weight:500}
+  .status-pill{padding:2px 10px;border-radius:999px;font-size:.7rem;font-weight:700;text-transform:uppercase}
+  .status-pill.running{background:#052e16;color:#4ade80}
+  .status-pill.degraded{background:#450a0a;color:#f87171}
+
+  /* ── findings & log ── */
+  .findings-list{display:flex;flex-direction:column;gap:6px;max-height:160px;overflow-y:auto}
+  .finding-item{background:var(--surface2);border-left:3px solid var(--accent);padding:7px 12px;border-radius:0 6px 6px 0;font-size:.78rem;font-family:var(--mono);line-height:1.4;color:#c7d2fe}
+  .comm-item{background:var(--surface2);border-left:3px solid var(--green);padding:7px 12px;border-radius:0 6px 6px 0;font-size:.78rem;line-height:1.4;color:#bbf7d0}
+  .empty-state{color:var(--muted);font-size:.8rem;font-style:italic}
+
+  /* ── action buttons ── */
+  .actions-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
+  .action-btn{background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 14px;border-radius:8px;font-size:.8rem;font-family:var(--mono);text-align:left;cursor:pointer;transition:all .15s;display:flex;gap:8px;align-items:center}
+  .action-btn:hover{border-color:var(--accent);color:var(--accent);background:#1e1b4b}
+  .action-btn:disabled{opacity:.35;cursor:not-allowed}
+  .action-btn.optimal{border-color:#059669;color:#34d399}
+  .action-btn.optimal:hover{background:#022c22}
+
+  /* ── step log ── */
+  .step-log{display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto}
+  .step-item{display:flex;gap:10px;font-size:.78rem;font-family:var(--mono);padding:5px 10px;border-radius:6px;background:var(--surface2)}
+  .step-num{color:var(--muted);min-width:40px}
+  .step-action{color:#a5b4fc;flex:1}
+  .step-reward{min-width:50px;text-align:right}
+  .step-reward.pos{color:var(--green)}
+  .step-reward.neg{color:var(--red)}
+  .step-reward.zero{color:var(--muted)}
+
+  /* ── score panel ── */
+  .score-display{font-size:2.5rem;font-weight:700;font-family:var(--mono);background:linear-gradient(90deg,#818cf8,#c084fc);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .breakdown-row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border);font-size:.8rem}
+  .breakdown-key{color:var(--muted)}
+  .breakdown-val{font-family:var(--mono);font-weight:600}
+  .progress-bar{height:4px;background:var(--border);border-radius:2px;flex:1;margin:0 12px}
+  .progress-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .4s ease}
+
+  /* ── toast ── */
+  #toast{position:fixed;bottom:24px;right:24px;background:#1e2535;border:1px solid var(--accent);color:var(--text);padding:12px 20px;border-radius:10px;font-size:.85rem;opacity:0;transform:translateY(10px);transition:all .3s;pointer-events:none;z-index:999;max-width:320px}
+  #toast.show{opacity:1;transform:translateY(0)}
+
+  /* ── scrollbar ── */
+  ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+</style>
+</head>
+<body>
+
+<header>
+  <span style="font-size:1.5rem">🚨</span>
+  <h1>DevOps Incident Triage</h1>
+  <span class="badge">OpenEnv v3</span>
+  <span style="margin-left:auto;font-size:.8rem;color:#6366f1" id="session-label">No session</span>
+</header>
+
+<div class="app">
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar">
+    <div>
+      <div class="section-label">Task</div>
+      <select id="task-select">
+        <option value="easy">🟢 easy — Auth deploy regression</option>
+        <option value="medium">🟡 medium — DB saturation spike</option>
+        <option value="hard">🔴 hard — Cascading outage</option>
+        <option value="network">🌐 network — BGP route leak</option>
+        <option value="memory_leak">💾 memory_leak — OOM kills</option>
+        <option value="disk_full">💿 disk_full — Log disk saturation</option>
+      </select>
+    </div>
+
+    <div class="toggle-row">
+      <label for="partial-obs">Partial observability</label>
+      <input type="checkbox" id="partial-obs"/>
+    </div>
+
+    <button class="btn-primary" id="btn-reset" onclick="resetEnv()">▶ Start Incident</button>
+    <button class="btn-demo" id="btn-demo" onclick="runDemo()">⚡ Auto-Solve (Demo)</button>
+
+    <hr style="border-color:var(--border)"/>
+
+    <!-- Score -->
+    <div>
+      <div class="section-label">Score</div>
+      <div class="score-display" id="score-val">—</div>
+      <div id="breakdown-panel" style="margin-top:10px;display:flex;flex-direction:column;gap:2px"></div>
+    </div>
+
+    <hr style="border-color:var(--border)"/>
+
+    <!-- Step log -->
+    <div style="flex:1;min-height:0">
+      <div class="section-label">Step Log</div>
+      <div class="step-log" id="step-log"><div class="empty-state">No steps yet</div></div>
+    </div>
+
+    <button class="btn-secondary" onclick="viewLeaderboard()" style="margin-top:auto">🏆 Leaderboard</button>
+  </aside>
+
+  <!-- ── Main ── -->
+  <div class="main">
+    <!-- Metrics bar -->
+    <div class="metrics-bar" id="metrics-bar">
+      <div class="metric"><span class="metric-label">Phase</span><span class="metric-value" id="m-phase">—</span></div>
+      <div class="metric"><span class="metric-label">Latency</span><span class="metric-value" id="m-latency">—</span></div>
+      <div class="metric"><span class="metric-label">Error Rate</span><span class="metric-value" id="m-error">—</span></div>
+      <div class="metric"><span class="metric-label">CPU</span><span class="metric-value" id="m-cpu">—</span></div>
+      <div class="metric"><span class="metric-label">Memory</span><span class="metric-value" id="m-mem">—</span></div>
+      <div class="metric"><span class="metric-label">Step</span><span class="metric-value" id="m-step">0 / —</span></div>
+    </div>
+
+    <div class="content">
+      <!-- Incident card -->
+      <div class="card" id="incident-card" style="display:none">
+        <div class="card-title">Active Incident</div>
+        <div class="incident-title" id="inc-title">—</div>
+        <div class="impact-text" id="inc-impact">—</div>
+        <div style="margin-top:10px" id="alerts-container"></div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <!-- Services -->
+        <div class="card">
+          <div class="card-title">Service Status</div>
+          <div class="services" id="services-grid"><div class="empty-state">Start an incident</div></div>
+        </div>
+        <!-- Findings -->
+        <div class="card">
+          <div class="card-title">Known Findings</div>
+          <div class="findings-list" id="findings-list"><div class="empty-state">Run a diagnostic action</div></div>
+        </div>
+      </div>
+
+      <!-- Communication log -->
+      <div class="card">
+        <div class="card-title">Communication Log</div>
+        <div class="findings-list" id="comm-list"><div class="empty-state">No communications yet</div></div>
+      </div>
+
+      <!-- Actions -->
+      <div class="card">
+        <div class="card-title">Available Actions <span style="color:var(--muted);font-size:.7rem">(green = optimal for this task)</span></div>
+        <div class="actions-grid" id="actions-grid"><div class="empty-state">Start an incident to see actions</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const BASE = '';
+let sessionId = null;
+let done = false;
+let optimalActions = [];
+let stepCount = 0;
+
+const TASK_OPTIMAL = {
+  easy: ['acknowledge_incident','inspect_deploy_history','rollback_auth_deploy','resolve_incident'],
+  medium: ['acknowledge_incident','inspect_db_metrics','scale_db_cluster','shift_traffic_canary','post_status_update','resolve_incident'],
+  hard: ['acknowledge_incident','inspect_auth_logs','inspect_deploy_history','inspect_db_metrics','rollback_auth_deploy','scale_db_cluster','shift_traffic_canary','post_status_update','resolve_incident'],
+  network: ['acknowledge_incident','inspect_network_topology','inspect_deploy_history','withdraw_bgp_route','shift_traffic_canary','post_status_update','resolve_incident'],
+  memory_leak: ['acknowledge_incident','inspect_memory_profile','inspect_deploy_history','rollback_service_deploy','scale_db_cluster','post_status_update','resolve_incident'],
+  disk_full: ['acknowledge_incident','inspect_disk_usage','inspect_deploy_history','archive_old_logs','reduce_log_verbosity','post_status_update','resolve_incident'],
+};
+
+function toast(msg, color='#6366f1') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.borderColor = color;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+async function api(path, method='GET', body=null) {
+  const opts = { method, headers: {'Content-Type':'application/json'} };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(BASE + path, opts);
+  if (!r.ok) { const e = await r.json(); throw new Error(e.detail || r.statusText); }
+  return r.json();
+}
+
+async function resetEnv() {
+  const task = document.getElementById('task-select').value;
+  const partial = document.getElementById('partial-obs').checked;
+  sessionId = 'ui_' + Math.random().toString(36).slice(2,8);
+  optimalActions = TASK_OPTIMAL[task] || [];
+  stepCount = 0;
+  done = false;
+
+  document.getElementById('step-log').innerHTML = '<div class="empty-state">No steps yet</div>';
+  document.getElementById('score-val').textContent = '—';
+  document.getElementById('breakdown-panel').innerHTML = '';
+
+  try {
+    const res = await api('/reset', 'POST', { task, session_id: sessionId, partial_obs: partial });
+    document.getElementById('session-label').textContent = `Session: ${sessionId}`;
+    document.getElementById('incident-card').style.display = '';
+    renderObservation(res.observation);
+    toast('Incident started — begin investigating!', '#6366f1');
+  } catch(e) { toast('Error: ' + e.message, '#ef4444'); }
+}
+
+async function takeAction(action) {
+  if (!sessionId || done) return;
+  try {
+    const res = await api('/step', 'POST', { name: action, session_id: sessionId });
+    stepCount++;
+    addStepLog(stepCount, action, res.reward, res.done);
+    renderObservation(res.observation);
+    await refreshScore();
+    if (res.done) {
+      done = true;
+      disableActions();
+      const msg = res.observation.incident_phase === 'resolved'
+        ? '✅ Incident resolved!' : '⏱ Episode ended (max steps reached)';
+      toast(msg, res.observation.incident_phase === 'resolved' ? '#22c55e' : '#f59e0b');
+    }
+    if (res.info && res.info.efficiency_bonus)
+      toast(`⚡ Efficiency bonus: +${res.info.efficiency_bonus}`, '#22c55e');
+  } catch(e) { toast('Error: ' + e.message, '#ef4444'); }
+}
+
+async function runDemo() {
+  const task = document.getElementById('task-select').value;
+  const partial = document.getElementById('partial-obs').checked;
+  toast('Running optimal policy…', '#8b5cf6');
+  try {
+    const res = await api(`/demo?task=${task}&partial_obs=${partial}`);
+    sessionId = res.session_id;
+    stepCount = 0;
+    done = true;
+    optimalActions = TASK_OPTIMAL[task] || [];
+
+    document.getElementById('session-label').textContent = `Session: ${sessionId}`;
+    document.getElementById('step-log').innerHTML = '';
+    document.getElementById('incident-card').style.display = '';
+
+    // Replay steps into log
+    for (const s of res.steps) {
+      addStepLog(s.step, s.action, s.reward, s.done);
+    }
+
+    // Show final observation from last step
+    if (res.steps.length > 0) {
+      const lastObs = res.steps[res.steps.length-1].observation;
+      renderObservation(lastObs);
+    }
+
+    // Score
+    document.getElementById('score-val').textContent = (res.final_score * 100).toFixed(1);
+    renderBreakdown(res.score_breakdown);
+    disableActions();
+    toast(`Demo complete — score: ${(res.final_score * 100).toFixed(1)}`, '#22c55e');
+  } catch(e) { toast('Error: ' + e.message, '#ef4444'); }
+}
+
+async function refreshScore() {
+  if (!sessionId) return;
+  try {
+    const s = await api(`/score?session_id=${sessionId}`);
+    document.getElementById('score-val').textContent = (s.score * 100).toFixed(1);
+    renderBreakdown(s.breakdown);
+  } catch(_){}
+}
+
+async function viewLeaderboard() {
+  try {
+    const res = await api('/leaderboard');
+    const board = res.leaderboard;
+    let html = '<h3 style="margin-bottom:12px">🏆 Leaderboard</h3>';
+    for (const [task, entries] of Object.entries(board)) {
+      if (!entries.length) continue;
+      html += `<strong style="color:#a5b4fc">${task}</strong><table style="width:100%;margin:6px 0 12px;font-size:.78rem;border-collapse:collapse">`;
+      html += '<tr style="color:#64748b"><th>Session</th><th>Score</th><th>Steps</th><th>Resolved</th></tr>';
+      for (const e of entries) {
+        html += `<tr><td style="font-family:monospace">${e.session_id.slice(0,14)}…</td><td style="color:#818cf8">${(e.score*100).toFixed(1)}</td><td>${e.steps}</td><td>${e.resolved ? '✅':'❌'}</td></tr>`;
+      }
+      html += '</table>';
+    }
+    if (!html.includes('<tr><td')) html += '<p style="color:#64748b;font-size:.85rem">No scores yet — run some episodes!</p>';
+    const win = window.open('', '_blank', 'width=600,height=500');
+    win.document.write(`<html><head><title>Leaderboard</title><style>body{background:#0d0f14;color:#e2e8f0;font-family:Inter,sans-serif;padding:24px}table{color:#e2e8f0}th,td{padding:6px 12px;text-align:left;border-bottom:1px solid #2a3347}</style></head><body>${html}</body></html>`);
+  } catch(e) { toast('Could not load leaderboard', '#ef4444'); }
+}
+
+function renderObservation(obs) {
+  if (!obs) return;
+
+  // Phase
+  const phaseEl = document.getElementById('m-phase');
+  phaseEl.textContent = obs.incident_phase;
+  phaseEl.className = 'metric-value';
+  if (obs.incident_phase === 'resolved') phaseEl.style.color = '#22c55e';
+  else if (obs.incident_phase === 'monitoring') phaseEl.style.color = '#f59e0b';
+  else phaseEl.style.color = '#f87171';
+
+  // Metrics
+  const m = obs.metrics || {};
+  setMetric('m-latency', m.latency_ms + ' ms', m.latency_ms > 400 ? 'crit' : m.latency_ms > 200 ? 'warn' : 'ok');
+  setMetric('m-error', m.error_rate + '%', m.error_rate > 10 ? 'crit' : m.error_rate > 3 ? 'warn' : 'ok');
+  setMetric('m-cpu', m.cpu_usage + '%', m.cpu_usage > 80 ? 'crit' : m.cpu_usage > 65 ? 'warn' : 'ok');
+  setMetric('m-mem', m.memory_usage + '%', m.memory_usage > 85 ? 'crit' : m.memory_usage > 70 ? 'warn' : 'ok');
+
+  const maxSteps = TASK_OPTIMAL[obs.task] ? 12 : '?';
+  document.getElementById('m-step').textContent = `${stepCount} / ${maxSteps}`;
+
+  // Incident card
+  document.getElementById('inc-title').textContent = obs.incident_title;
+  document.getElementById('inc-impact').textContent = obs.customer_impact;
+
+  // Alerts
+  const ac = document.getElementById('alerts-container');
+  ac.innerHTML = (obs.active_alerts || []).map(a => `<div class="alert-item">${a}</div>`).join('') || '';
+
+  // Services
+  const sg = document.getElementById('services-grid');
+  const status = obs.service_status || {};
+  sg.innerHTML = Object.entries(status).map(([name, s]) =>
+    `<div class="service-item"><span class="service-name">${name}</span><span class="status-pill ${s}">${s}</span></div>`
+  ).join('') || '<div class="empty-state">—</div>';
+
+  // Findings
+  const fl = document.getElementById('findings-list');
+  const findings = obs.known_findings || [];
+  fl.innerHTML = findings.length
+    ? findings.map(f => `<div class="finding-item">${f}</div>`).join('')
+    : '<div class="empty-state">Run a diagnostic action</div>';
+
+  // Comm log
+  const cl = document.getElementById('comm-list');
+  const comms = obs.communication_log || [];
+  cl.innerHTML = comms.length
+    ? comms.map(c => `<div class="comm-item">📢 ${c}</div>`).join('')
+    : '<div class="empty-state">No communications yet</div>';
+
+  // Actions
+  const ag = document.getElementById('actions-grid');
+  const actions = obs.available_actions || [];
+  ag.innerHTML = actions.map(a => {
+    const isOptimal = optimalActions.includes(a);
+    return `<button class="action-btn ${isOptimal ? 'optimal' : ''}" onclick="takeAction('${a}')" id="ab-${a}">${isOptimal ? '★ ' : ''}${a.replace(/_/g, ' ')}</button>`;
+  }).join('');
+}
+
+function setMetric(id, val, cls) {
+  const el = document.getElementById(id);
+  el.textContent = val;
+  el.className = 'metric-value ' + cls;
+}
+
+function addStepLog(step, action, reward, isDone) {
+  const log = document.getElementById('step-log');
+  if (log.querySelector('.empty-state')) log.innerHTML = '';
+  const cls = reward > 0 ? 'pos' : reward < 0 ? 'neg' : 'zero';
+  const sign = reward > 0 ? '+' : '';
+  const item = document.createElement('div');
+  item.className = 'step-item';
+  item.innerHTML = `<span class="step-num">#${step}</span><span class="step-action">${action.replace(/_/g,' ')}</span><span class="step-reward ${cls}">${sign}${reward.toFixed(2)}</span>`;
+  log.appendChild(item);
+  log.scrollTop = log.scrollHeight;
+}
+
+function renderBreakdown(breakdown) {
+  const panel = document.getElementById('breakdown-panel');
+  panel.innerHTML = '';
+  const skip = ['harm_penalty'];
+  for (const [k, v] of Object.entries(breakdown)) {
+    if (skip.includes(k)) continue;
+    const pct = Math.round(v * 100);
+    panel.innerHTML += `<div class="breakdown-row">
+      <span class="breakdown-key">${k}</span>
+      <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
+      <span class="breakdown-val">${pct}</span>
+    </div>`;
+  }
+  if (breakdown.harm_penalty > 0) {
+    panel.innerHTML += `<div style="margin-top:6px;font-size:.72rem;color:#f87171">⚠ harm penalty: -${(breakdown.harm_penalty*100).toFixed(0)}</div>`;
+  }
+}
+
+function disableActions() {
+  document.querySelectorAll('.action-btn').forEach(b => b.disabled = true);
+}
+</script>
+</body>
+</html>
