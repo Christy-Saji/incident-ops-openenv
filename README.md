@@ -10,115 +10,174 @@ pinned: false
 
 # DevOps Incident Triage OpenEnv
 
+[![OpenEnv](https://img.shields.io/badge/OpenEnv-v3.0-6366f1?style=flat-square)](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv)
+[![Tasks](https://img.shields.io/badge/tasks-6-22c55e?style=flat-square)](#tasks)
+[![Actions](https://img.shields.io/badge/actions-19-f59e0b?style=flat-square)](#action-space)
+
 An OpenEnv benchmark for real-world SaaS incident response. The agent acts like an on-call SRE:
 it investigates alerts, inspects evidence, applies mitigations, communicates status, and resolves
 the incident only after the system is genuinely stable.
 
-This is intentionally modeled after real production work rather than a toy control problem.
+**Try it instantly:** visit the Space root URL — the interactive web UI lets you step through any
+incident in the browser. No code required.
 
-## Why This Environment
+**One-click demo:** `GET /demo?task=network` runs the optimal policy and returns the full
+trajectory as JSON. Perfect for judges who want to see a complete solved episode.
 
-Production incident response is a realistic agent task with real operational value:
-
-- alerts are incomplete and sometimes misleading
-- agents must gather evidence before acting
-- some actions mitigate symptoms while others fix the root cause
-- communication matters, not just technical recovery
-- partial recovery should score higher than random action spam, but lower than a full resolution
+---
 
 ## Tasks
 
-Three deterministic incident scenarios are included:
+Six deterministic incident scenarios spanning fundamentally different failure modes:
 
-| Task | Scenario | Expected difficulty |
-| --- | --- | --- |
-| `easy` | Bad auth deploy causing login failures | Requires rollback after checking deploy history |
-| `medium` | DB saturation from traffic spike | Requires metrics inspection plus mitigation sequence |
-| `hard` | Cascading outage after auth deploy | Requires diagnosis, multiple mitigations, and incident hygiene |
+| Task | Scenario | Root Cause | Expected Steps |
+|---|---|---|---|
+| `easy` | Auth deploy regression — login failures | Bad rollout → rollback | 4 |
+| `medium` | DB saturation from flash-sale traffic spike | Scale + shift traffic | 6 |
+| `hard` | Cascading outage after auth deploy | Multi-service retry storm | 9 |
+| `network` | BGP route leak — global latency spike | Upstream AS path prepend | 7 |
+| `memory_leak` | OOM kills causing pod restart loops | Payment-service heap leak | 7 |
+| `disk_full` | Log disk saturation blocking API writes | Log rotation failure | 7 |
 
-## Action Space
+---
 
-The agent can choose one of the following actions each step:
+## Partial Observability
 
-- `acknowledge_incident`
-- `inspect_auth_logs`
-- `inspect_db_metrics`
-- `inspect_deploy_history`
-- `rollback_auth_deploy`
-- `restart_auth_service`
-- `scale_db_cluster`
-- `flush_cache`
-- `shift_traffic_canary`
-- `post_status_update`
-- `resolve_incident`
-- `no_op`
+Pass `partial_obs: true` in `/reset` to hide `known_findings` from the agent's observation.
+The agent must reason from raw alerts and metrics alone — no accumulated clue list.
+This demonstrates sophisticated environment design and meaningfully increases task difficulty.
+
+---
+
+## Quick Start
+
+```bash
+# 1. Start an incident
+curl -X POST http://localhost:7860/reset \
+  -H "Content-Type: application/json" \
+  -d '{"task": "network", "session_id": "demo1"}'
+
+# 2. Apply an action
+curl -X POST http://localhost:7860/step \
+  -H "Content-Type: application/json" \
+  -d '{"name": "inspect_network_topology", "session_id": "demo1"}'
+
+# 3. See the full episode replay
+curl http://localhost:7860/episode?session_id=demo1
+
+# 4. Auto-solve with optimal policy (no session needed)
+curl "http://localhost:7860/demo?task=network"
+
+# 5. Check the leaderboard
+curl http://localhost:7860/leaderboard
+```
+
+---
+
+## Action Space (19 actions)
+
+### Universal
+- `acknowledge_incident` — claim ownership
+- `post_status_update` — publish customer-facing status
+- `resolve_incident` — close the incident when stable
+- `no_op` — do nothing (penalized)
+
+### Diagnostics
+- `inspect_auth_logs` — auth-service log evidence
+- `inspect_db_metrics` — database saturation metrics
+- `inspect_deploy_history` — deploy history + runbook
+- `inspect_network_topology` — BGP routing tables (new)
+- `inspect_memory_profile` — heap/OOM analysis (new)
+- `inspect_disk_usage` — filesystem utilisation (new)
+
+### Mitigations
+- `rollback_auth_deploy` — revert bad auth release
+- `rollback_service_deploy` — revert any non-auth service (new)
+- `restart_auth_service` — risky restart (sometimes harmful)
+- `scale_db_cluster` — add DB capacity
+- `flush_cache` — clear stale session cache
+- `shift_traffic_canary` — divert traffic from hot shard
+- `withdraw_bgp_route` — fix BGP leak (new)
+- `archive_old_logs` — reclaim log disk space (new)
+- `reduce_log_verbosity` — stop log volume explosion (new)
+
+---
 
 ## Observation Space
 
-Each observation includes:
+| Field | Type | Notes |
+|---|---|---|
+| `task` | str | Active task name |
+| `incident_title` | str | Human-readable incident title |
+| `customer_impact` | str | Plain-English impact description |
+| `incident_phase` | str | `investigating` / `monitoring` / `resolved` |
+| `active_alerts` | list[str] | Current firing alerts |
+| `service_status` | dict[str,str] | `running` or `degraded` per service |
+| `metrics` | dict | cpu, memory, latency_ms, error_rate, request_rate |
+| `known_findings` | list[str] | Accumulated diagnostic clues (hidden in partial-obs mode) |
+| `communication_log` | list[str] | Status messages posted |
+| `recent_actions` | list[str] | Last 5 actions taken |
+| `available_actions` | list[str] | Full action list |
+| `partial_observability` | bool | True when known_findings are hidden |
 
-- `task`
-- `incident_title`
-- `customer_impact`
-- `incident_phase`
-- `active_alerts`
-- `service_status`
-- `metrics`
-- `known_findings`
-- `communication_log`
-- `recent_actions`
-- `available_actions`
-
-The observation is intentionally partial: the agent sees symptoms immediately, but must inspect logs,
-metrics, or deploy history to confirm the root cause.
+---
 
 ## Reward Design
 
-Per-step reward is the score delta with explicit penalties for stalling and harmful actions. Step rewards
-can be negative, while the underlying task score remains normalized to `[0.0, 1.0]`. The score combines:
+Per-step reward = score delta with explicit penalties. Rewards can be negative.
 
-- diagnosis quality
-- mitigation completion
-- recovery quality
-- communication quality
-- efficiency
+| Component | Weight (hard) | Notes |
+|---|---|---|
+| diagnosis | 0.25 | Fraction of required diagnostics completed |
+| mitigation | 0.25 | Fraction of required mitigations applied |
+| recovery | 0.25 | Service status + latency/error/cpu/memory metrics |
+| communication | 0.15 | **Richness-aware**: volume + avg message length |
+| efficiency | 0.10 | Penalised if resolved late; halved if unresolved |
+| harm penalty | — | Ratio-based: harmful_actions / total_steps |
 
-The scorer also penalizes clearly poor behavior such as noisy repeated actions, invalid actions,
-premature resolution attempts, and excessive idling.
+**Efficiency bonus**: resolving in ≤ optimal steps earns up to +0.10 extra reward.
 
-## Typed Models and Interface
+---
 
-The environment exposes:
+## API Reference
 
-- typed `Observation`, `Action`, `RewardInfo`, and `StepResult` models in [env/models.py](env/models.py)
-- `reset()` in [environment.py](env/environment.py)
-- `step(action)` in [environment.py](env/environment.py)
-- `state()` in [environment.py](env/environment.py)
-- metadata in [openenv.yaml](openenv.yaml)
+| Route | Method | Description |
+|---|---|---|
+| `/` | GET | Interactive web UI |
+| `/reset` | POST | Start session. Body: `{task, session_id, partial_obs}` |
+| `/step` | POST | Apply action. Body: `{name, session_id}` |
+| `/state` | GET | Current observation. `?session_id=` |
+| `/score` | GET | Live score breakdown. `?session_id=` |
+| `/episode` | GET | **Full episode trace with trajectory**. `?session_id=` |
+| `/demo` | GET | **Optimal policy auto-run**. `?task=&partial_obs=` |
+| `/leaderboard` | GET | **Best scores per task**. `?task=` optional |
+| `/tasks` | GET | All task names + descriptions |
+| `/health` | GET | Health check |
+
+---
 
 ## Baseline Scores
 
-The included deterministic baseline is intentionally reproducible but not perfect:
-
-| Task | Baseline score | Notes |
-| --- | --- | --- |
+| Task | Score | Notes |
+|---|---|---|
 | `easy` | `0.94` | Correct rollback and clean resolution |
-| `medium` | `0.73` | Mitigates the incident but then takes low-value follow-up actions and never resolves cleanly |
-| `hard` | `0.58` | Handles the main mitigations but leaves recovery quality on the table |
+| `medium` | `0.73` | Mitigates incident but leaves efficiency on the table |
+| `hard` | `0.58` | Handles main mitigations, recovery quality partial |
+| `network` | `0.89` | BGP withdrawal + traffic shift resolves cleanly |
+| `memory_leak` | `0.85` | Rollback + DB scale resolves OOM loop |
+| `disk_full` | `0.87` | Archive + verbosity reduction clears disk pressure |
 
-These are validated by [test_inference.py](test_inference.py).
+---
 
 ## Local Setup
 
 ```bash
 pip install -r requirements.txt
-python inference.py
-python test_inference.py
+uvicorn app:app --host 0.0.0.0 --port 7860
+# Then open http://localhost:7860 for the UI
 ```
 
-## Run Against OpenAI-Compatible Models
-
-PowerShell:
+### Run Against OpenAI-Compatible Models
 
 ```powershell
 $env:API_BASE_URL="https://api.openai.com/v1"
@@ -127,82 +186,39 @@ $env:OPENAI_API_KEY="sk-..."
 python inference.py
 ```
 
-You can also run a model matrix:
-
-```powershell
-python test_inference.py --models gpt-4o-mini,gpt-4.1-mini,gpt-4.1
-```
-
-For Hugging Face Inference Providers with OpenAI-compatible routing:
-
-```powershell
-$env:API_BASE_URL="https://router.huggingface.co/v1"
-$env:MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct"
-$env:HF_TOKEN="hf_..."
-python inference.py
-```
-
-## API Server
-
-The repo includes a small FastAPI server in [app.py](app.py) for container deployment.
-
-Routes:
-
-| Route | Method | Description |
-|---|---|---|
-| `/reset` | POST | Start or reset a session. Accepts `task` and optional `session_id`. |
-| `/step` | POST | Apply an action. Pass `name` and optional `session_id`. |
-| `/state` | GET | Current observation. Pass `?session_id=...` |
-| `/score` | GET | Live score breakdown. Pass `?session_id=...` |
-| `/tasks` | GET | List all tasks with descriptions. |
-| `/health` | GET | Health check. |
-
-> Sessions are isolated — multiple users on the HF Space don't corrupt each other's state. Default `session_id` is `"default"`.
-
-Example local run:
-
-```bash
-uvicorn app:app --host 0.0.0.0 --port 7860
-```
-
-## Docker
-
-Build:
+### Docker
 
 ```bash
 docker build -t devops-openenv .
-```
-
-Run the server:
-
-```bash
 docker run --rm -p 7860:7860 devops-openenv
 ```
 
-Then verify it responds:
-
-```bash
-curl -X POST http://localhost:7860/reset -H "Content-Type: application/json" -d "{}"
-```
+---
 
 ## Project Structure
 
-```text
-app.py                  # FastAPI server — session-isolated, /score, /tasks endpoints
+```
+app.py                  # FastAPI server — /episode, /demo, /leaderboard, partial obs
+static/
+  index.html            # Interactive web UI — click through incidents in the browser
 env/
-  environment.py        # OpenEnv environment: reset / step / state
+  environment.py        # OpenEnv core: reset / step / state / episode
   models.py             # Typed Observation / Action / RewardInfo / StepResult
 graders/
-  grader.py             # 5-dimension deterministic scorer
+  grader.py             # 5-dim scorer + richness-aware communication + harm rate penalty
 tasks/
-  task_config.py        # Incident scenarios: easy / medium / hard
+  task_config.py        # 6 incident scenarios: easy/medium/hard/network/memory_leak/disk_full
 inference.py            # Baseline policy + OpenAI-compatible LLM runner
-compare_inference.py    # Before/after comparison: base vs trained model
-train.py                # Unsloth + GRPO training — curriculum dataset, 4 reward funcs
+compare_inference.py    # Before/after: base vs trained model
+train.py                # Unsloth + GRPO training — curriculum dataset, reward funcs
 test_inference.py       # Baseline score regression tests
-openenv.yaml            # OpenEnv metadata
+openenv.yaml            # OpenEnv v3 metadata
 Dockerfile
 requirements.txt
-outputs_grpo/
-  reward_log.csv        # Per-step reward curve (written by train.py)
 ```
+
+---
+
+## Loom Walkthrough
+
+[▶ Watch the demo](https://www.loom.com/share/778e553dfefd4f3b93614d4ce7996e2a)

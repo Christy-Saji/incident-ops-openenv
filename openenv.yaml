@@ -1,22 +1,44 @@
 name: devops_incident_triage_env
 description: >
   A realistic OpenEnv benchmark for SaaS production incident response.
-  Agents investigate alerts, inspect evidence, apply mitigations, communicate status,
-  and resolve incidents through a typed step/reset/state interface.
+  Agents investigate alerts, inspect evidence, apply mitigations, communicate
+  status, and resolve incidents through a typed step/reset/state interface.
+  Six distinct incident scenarios span authentication failures, database
+  saturation, cascading outages, BGP route leaks, OOM kill loops, and log
+  disk saturation. Supports partial-observability mode and full episode replay.
 
-version: "2.0"
+version: "3.0"
 
 actions:
+  # Universal
   - name: acknowledge_incident
     description: Claim ownership of the incident and begin coordinated response.
+  - name: post_status_update
+    description: Publish a customer-facing incident update with mitigation progress.
+  - name: resolve_incident
+    description: Mark the incident resolved once service health and communication are complete.
+  - name: no_op
+    description: Do nothing; penalized because incidents require action.
+
+  # Diagnostics
   - name: inspect_auth_logs
     description: Review auth-service logs for root-cause evidence.
   - name: inspect_db_metrics
     description: Inspect database saturation metrics and connection pressure.
   - name: inspect_deploy_history
     description: Review the latest production deploy history and runbook clues.
+  - name: inspect_network_topology
+    description: Examine BGP routing tables and edge-router advertisements.
+  - name: inspect_memory_profile
+    description: Analyse heap allocation trends and OOM kill history.
+  - name: inspect_disk_usage
+    description: Check filesystem utilisation and log rotation status.
+
+  # Mitigations
   - name: rollback_auth_deploy
     description: Roll back the latest auth deploy if it is the root cause.
+  - name: rollback_service_deploy
+    description: Roll back a non-auth service deploy (e.g. payment-service).
   - name: restart_auth_service
     description: Restart the auth service; sometimes noisy if the deploy is still bad.
   - name: scale_db_cluster
@@ -25,12 +47,12 @@ actions:
     description: Flush or warm the cache to reduce stale-session pressure.
   - name: shift_traffic_canary
     description: Shift traffic away from the hottest shard or degraded path.
-  - name: post_status_update
-    description: Publish a customer-facing incident update with mitigation progress.
-  - name: resolve_incident
-    description: Mark the incident resolved once service health and communication are complete.
-  - name: no_op
-    description: Do nothing; penalized because incidents require action.
+  - name: withdraw_bgp_route
+    description: Withdraw a leaked BGP advertisement and restore the shorter AS path.
+  - name: archive_old_logs
+    description: Compress and archive old log files to reclaim disk space.
+  - name: reduce_log_verbosity
+    description: Revert logging level to INFO/WARN to reduce log volume.
 
 observation_space:
   task:
@@ -47,7 +69,7 @@ observation_space:
     items: str
   service_status:
     type: dict
-    keys: [auth, api, db, cache]
+    keys: [auth, api, db, cache, network]
     values: [running, degraded]
   metrics:
     type: dict
@@ -56,6 +78,7 @@ observation_space:
   known_findings:
     type: list
     items: str
+    note: Hidden when partial_observability=true
   communication_log:
     type: list
     items: str
@@ -65,12 +88,17 @@ observation_space:
   available_actions:
     type: list
     items: str
+  partial_observability:
+    type: bool
+    description: When true, known_findings are hidden to increase difficulty.
 
 reward:
-  range: [-0.25, 1]
+  range: [-0.25, 1.0]
   description: >
-    Per-step reward equals positive score improvement only. The underlying task score combines
-    diagnosis, mitigation quality, system recovery, communication, and efficiency with task-specific weights.
+    Per-step reward equals score delta with explicit penalties.
+    The underlying score combines diagnosis, mitigation, recovery,
+    communication quality (richness-aware), and efficiency.
+    Additional bonuses for early resolution; penalties for harmful-action rate.
 
 tasks:
   - name: easy
@@ -82,6 +110,15 @@ tasks:
   - name: hard
     description: Cascading multi-service outage triggered by a bad auth deploy.
     expected_steps: 9
+  - name: network
+    description: BGP route leak from upstream peer causing global latency spike.
+    expected_steps: 7
+  - name: memory_leak
+    description: OOM kills from a payment-service memory leak causing pod restart loops.
+    expected_steps: 7
+  - name: disk_full
+    description: Log disk saturation blocking API writes due to failed log rotation.
+    expected_steps: 7
 
 graders:
   deterministic: true
@@ -90,20 +127,30 @@ graders:
     - diagnosis quality
     - mitigation completion
     - recovery quality
-    - communication quality
+    - communication quality (richness-aware)
     - efficiency
+    - harmful action rate penalty
 
 interface:
-  reset: Returns the initial typed observation for the selected task.
-  step: "step(action) -> (observation, reward, done, info)"
-  state: Returns the current observation snapshot.
+  reset: "POST /reset — returns initial typed observation. Accepts task, session_id, partial_obs."
+  step: "POST /step — step(action) -> (observation, reward, done, info)"
+  state: "GET /state — returns current observation snapshot."
+  episode: "GET /episode — returns full episode trace with trajectory for replay."
+  demo: "GET /demo — runs optimal policy, returns complete solved trajectory as JSON."
+  leaderboard: "GET /leaderboard — best scores per task across all sessions."
 
 server:
   routes:
     - POST /reset
     - POST /step
     - GET /state
+    - GET /score
+    - GET /episode
+    - GET /demo
+    - GET /leaderboard
+    - GET /tasks
     - GET /health
+    - GET /  (interactive web UI)
 
 inference:
   env_vars:
