@@ -4,7 +4,6 @@ __pycache__/
 .venv
 venv/
 devopsenv/
-ENV/
 env.bak/
 .DS_Store
 output.txt
