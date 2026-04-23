@@ -10,10 +10,13 @@ Curriculum design:
   Shuffled before training.
 
 Reward functions:
-  1. format_reward_func       — valid action string check
-  2. step_reward_func         — environment step reward (task-aware)
-  3. anti_cheat_reward_func   — penalise no_op / premature resolve
+  1. format_reward_func         — valid action string check
+  2. step_reward_func           — environment step reward (task-aware)
+  3. anti_cheat_reward_func     — penalise no_op / premature resolve
   4. task_alignment_reward_func — rewards diagnostics/mitigations matching the task
+
+Note: torch / unsloth / trl are imported lazily inside main() so that the
+reward functions and dataset helpers can be imported on machines without a GPU.
 """
 
 import csv
@@ -22,11 +25,7 @@ import os
 import random
 from typing import List
 
-import torch
 from datasets import Dataset
-from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
-from unsloth import FastLanguageModel, PatchDPOTrainer
-from trl import GRPOTrainer, GRPOConfig
 
 from env.environment import DevOpsEnv
 from env.models import VALID_ACTIONS
@@ -144,8 +143,12 @@ def task_alignment_reward_func(prompts, completions, **kwargs) -> List[float]:
 # 2. Reward Curve Logger Callback
 # ---------------------------------------------------------------------------
 
-class RewardLoggerCallback(TrainerCallback):
-    """Saves per-step reward metrics to a CSV for demo reward curves."""
+class RewardLoggerCallback:
+    """Saves per-step reward metrics to a CSV for demo reward curves.
+
+    Inherits from transformers.TrainerCallback at runtime (when instantiated
+    inside main()) so this module can be imported without torch/transformers.
+    """
 
     REWARD_KEYS = [
         "reward",
@@ -155,19 +158,21 @@ class RewardLoggerCallback(TrainerCallback):
         "reward_task_alignment_reward_func",
     ]
 
+    def __new__(cls, log_path: str = REWARD_LOG_PATH):
+        """Dynamically subclass TrainerCallback at instantiation time."""
+        from transformers import TrainerCallback
+        # Build a proper subclass the first time we're instantiated
+        if not issubclass(cls, TrainerCallback):
+            cls.__bases__ = (TrainerCallback,)
+        instance = object.__new__(cls)
+        return instance
+
     def __init__(self, log_path: str = REWARD_LOG_PATH):
         self.log_path = log_path
         self._header_written = False
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
-    def on_log(
-        self,
-        args: TrainingArguments,
-        state: TrainerState,
-        control: TrainerControl,
-        logs=None,
-        **kwargs,
-    ):
+    def on_log(self, args, state, control, logs=None, **kwargs):
         if logs is None:
             return
 
@@ -246,6 +251,12 @@ def generate_prompts(
 # ---------------------------------------------------------------------------
 
 def main():
+    # GPU-only imports — kept here so the module can be imported without a GPU
+    import torch  # noqa: F401
+    from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments  # noqa: F401
+    from unsloth import FastLanguageModel, PatchDPOTrainer
+    from trl import GRPOTrainer, GRPOConfig
+
     print("[1] Loading Unsloth Model Space...")
     PatchDPOTrainer()  # Required optimisations
 
