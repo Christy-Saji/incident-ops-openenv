@@ -148,10 +148,16 @@ The repo includes a small FastAPI server in [app.py](app.py) for container deplo
 
 Routes:
 
-- `POST /reset`
-- `POST /step`
-- `GET /state`
-- `GET /health`
+| Route | Method | Description |
+|---|---|---|
+| `/reset` | POST | Start or reset a session. Accepts `task` and optional `session_id`. |
+| `/step` | POST | Apply an action. Pass `name` and optional `session_id`. |
+| `/state` | GET | Current observation. Pass `?session_id=...` |
+| `/score` | GET | Live score breakdown. Pass `?session_id=...` |
+| `/tasks` | GET | List all tasks with descriptions. |
+| `/health` | GET | Health check. |
+
+> Sessions are isolated — multiple users on the HF Space don't corrupt each other's state. Default `session_id` is `"default"`.
 
 Example local run:
 
@@ -182,17 +188,21 @@ curl -X POST http://localhost:7860/reset -H "Content-Type: application/json" -d 
 ## Project Structure
 
 ```text
-app.py               # FastAPI server for Space-style deployment
+app.py                  # FastAPI server — session-isolated, /score, /tasks endpoints
 env/
-  environment.py     # OpenEnv environment implementation
-  models.py          # Typed observation/action/reward models
+  environment.py        # OpenEnv environment: reset / step / state
+  models.py             # Typed Observation / Action / RewardInfo / StepResult
 graders/
-  grader.py          # Task-specific scoring logic
+  grader.py             # 5-dimension deterministic scorer
 tasks/
-  task_config.py     # Realistic incident scenarios and task metadata
-inference.py         # Baseline + OpenAI-client runner
-test_inference.py    # Structured output validator and baseline score checker
-openenv.yaml         # Environment metadata
+  task_config.py        # Incident scenarios: easy / medium / hard
+inference.py            # Baseline policy + OpenAI-compatible LLM runner
+compare_inference.py    # Before/after comparison: base vs trained model
+train.py                # Unsloth + GRPO training — curriculum dataset, 4 reward funcs
+test_inference.py       # Baseline score regression tests
+openenv.yaml            # OpenEnv metadata
 Dockerfile
 requirements.txt
+outputs_grpo/
+  reward_log.csv        # Per-step reward curve (written by train.py)
 ```
