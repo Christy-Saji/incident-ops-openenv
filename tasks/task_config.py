@@ -1,6 +1,6 @@
 """Task configurations for realistic DevOps incident response scenarios."""
 
-VALID_TASKS = ["easy", "medium", "hard"]
+VALID_TASKS = ["easy", "medium", "hard", "network", "memory_leak", "disk_full"]
 
 TASK_CONFIGS = {
     "easy": {
@@ -150,6 +150,193 @@ TASK_CONFIGS = {
             "rollback_auth_deploy",
             "scale_db_cluster",
             "shift_traffic_canary",
+            "post_status_update",
+            "resolve_incident",
+        ],
+    },
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # NEW TASK SCENARIOS
+    # ──────────────────────────────────────────────────────────────────────────
+
+    "network": {
+        "title": "BGP route leak causing latency spike",
+        "description": (
+            "A BGP route leak from an upstream provider has injected a longer AS path, "
+            "pushing inter-region latency above SLO. Traffic is still flowing but the "
+            "added hops are degrading API response times globally."
+        ),
+        "max_steps": 10,
+        "customer_impact": (
+            "API latency has doubled globally. EU users report 900ms+ response times. "
+            "No service errors yet but SLO burn rate is accelerating."
+        ),
+        "service_status": {
+            "auth": "running",
+            "api": "degraded",
+            "db": "running",
+            "network": "degraded",
+        },
+        "metrics": {
+            "cpu_usage": 42,
+            "memory_usage": 51,
+            "latency_ms": 940,
+            "error_rate": 3,
+            "request_rate": 1100,
+        },
+        "alerts": [
+            "global p99 latency above 800ms SLO",
+            "BGP route table anomaly detected on edge router eu-west-2",
+            "cross-region RTT increased by 380ms",
+        ],
+        "recent_deploys": [
+            "no application deploys in the last 6 hours",
+            "network config pushed to edge routers 25 minutes ago",
+        ],
+        "log_hints": [
+            "network log: unexpected AS path prepend from upstream peer AS64500",
+            "network log: eu-west-2 edge advertising /21 prefix via longer path since 14:02 UTC",
+            "network log: traffic to eu-west-2 traversing 4 extra hops through AS64500",
+        ],
+        "db_hints": [
+            "db metrics: nominal latency, no connection pressure — db is not the cause",
+        ],
+        "runbook_hint": (
+            "BGP route leaks are mitigated by withdrawing the leaked route and failing over "
+            "traffic to healthy regions. Filtering bogon routes prevents recurrence."
+        ),
+        "required_diagnostics": ["inspect_network_topology", "inspect_deploy_history"],
+        "required_mitigations": ["withdraw_bgp_route", "shift_traffic_canary"],
+        "good_followups": ["acknowledge_incident", "post_status_update", "resolve_incident"],
+        "optimal_actions": [
+            "acknowledge_incident",
+            "inspect_network_topology",
+            "inspect_deploy_history",
+            "withdraw_bgp_route",
+            "shift_traffic_canary",
+            "post_status_update",
+            "resolve_incident",
+        ],
+    },
+
+    "memory_leak": {
+        "title": "OOM kills causing cascading service restarts",
+        "description": (
+            "A memory leak introduced in the payment-service v3.2.1 is causing OOM kills "
+            "every 8–10 minutes. Each OOM kill triggers a Kubernetes pod restart which "
+            "creates a thundering herd on the DB connection pool."
+        ),
+        "max_steps": 11,
+        "customer_impact": (
+            "Payment processing fails intermittently during pod restarts. "
+            "10% of transactions in the past 20 minutes returned 503 or timed out."
+        ),
+        "service_status": {
+            "auth": "running",
+            "api": "degraded",
+            "db": "degraded",
+            "cache": "running",
+        },
+        "metrics": {
+            "cpu_usage": 55,
+            "memory_usage": 94,
+            "latency_ms": 380,
+            "error_rate": 14,
+            "request_rate": 890,
+        },
+        "alerts": [
+            "payment-service OOMKilled 3 times in last 30 minutes",
+            "pod restart loop detected in payment namespace",
+            "db connection pool exhaustion during pod cold-start",
+        ],
+        "recent_deploys": [
+            "payment-service deployed version 3.2.1 forty minutes ago",
+            "no infra changes in the last 24 hours",
+        ],
+        "log_hints": [
+            "payment-service log: heap allocation growing unbounded in transaction cache",
+            "payment-service log: OOMKilled signal received — memory limit 512Mi exceeded",
+            "k8s log: pod payment-service-7f9d restarted 3 times, back-off delay active",
+        ],
+        "db_hints": [
+            "db metrics: connection spike every 8 minutes correlates with pod restart timing",
+            "db metrics: max_connections reached during payment-service cold-start",
+        ],
+        "runbook_hint": (
+            "OOM loops from a bad deploy should be stopped by rolling back the release. "
+            "Temporarily increasing memory limits buys time but is not a fix. "
+            "Scale the DB connection pool to absorb cold-start spikes."
+        ),
+        "required_diagnostics": ["inspect_memory_profile", "inspect_deploy_history"],
+        "required_mitigations": ["rollback_service_deploy", "scale_db_cluster"],
+        "good_followups": ["acknowledge_incident", "post_status_update", "resolve_incident"],
+        "optimal_actions": [
+            "acknowledge_incident",
+            "inspect_memory_profile",
+            "inspect_deploy_history",
+            "rollback_service_deploy",
+            "scale_db_cluster",
+            "post_status_update",
+            "resolve_incident",
+        ],
+    },
+
+    "disk_full": {
+        "title": "Log disk saturation blocking writes",
+        "description": (
+            "The /var/log partition on the primary API hosts has reached 98% capacity. "
+            "Log rotation failed silently three hours ago. Application writes are now "
+            "blocking because the logging library uses synchronous writes."
+        ),
+        "max_steps": 9,
+        "customer_impact": (
+            "API response times have increased by 4–6× as write threads block on disk I/O. "
+            "5% of requests are timing out. New feature uploads are failing silently."
+        ),
+        "service_status": {
+            "auth": "running",
+            "api": "degraded",
+            "db": "running",
+            "cache": "running",
+        },
+        "metrics": {
+            "cpu_usage": 61,
+            "memory_usage": 58,
+            "latency_ms": 620,
+            "error_rate": 9,
+            "request_rate": 740,
+        },
+        "alerts": [
+            "disk usage /var/log above 95% on api-host-01, api-host-02",
+            "log rotation cron job failed — exit code 1 — last success 3 hours ago",
+            "api p95 write latency above 500ms",
+        ],
+        "recent_deploys": [
+            "no application deploys in the last 12 hours",
+            "logging verbosity increased to DEBUG level 4 hours ago for troubleshooting",
+        ],
+        "log_hints": [
+            "system log: logrotate error — disk full, cannot rename /var/log/api/current.log",
+            "system log: DEBUG logging enabled at 10:15 UTC — log volume increased 8×",
+            "system log: /var/log at 98.3% — 420MB free of 20GB partition",
+        ],
+        "db_hints": [
+            "db metrics: nominal — not involved in this incident",
+        ],
+        "runbook_hint": (
+            "Disk saturation from logs is mitigated by archiving old logs, "
+            "reducing log verbosity, and fixing log rotation. "
+            "Do not delete logs without archiving — required for audit."
+        ),
+        "required_diagnostics": ["inspect_disk_usage", "inspect_deploy_history"],
+        "required_mitigations": ["archive_old_logs", "reduce_log_verbosity"],
+        "good_followups": ["acknowledge_incident", "post_status_update", "resolve_incident"],
+        "optimal_actions": [
+            "acknowledge_incident",
+            "inspect_disk_usage",
+            "inspect_deploy_history",
+            "archive_old_logs",
+            "reduce_log_verbosity",
             "post_status_update",
             "resolve_incident",
         ],
