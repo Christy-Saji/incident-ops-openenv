@@ -6,18 +6,30 @@ from pydantic import BaseModel, Field, field_validator
 
 
 VALID_ACTIONS = [
+    # ── Universal ──────────────────────────────────────────────────────────
     "acknowledge_incident",
+    "post_status_update",
+    "resolve_incident",
+    "no_op",
+
+    # ── Diagnostics ────────────────────────────────────────────────────────
     "inspect_auth_logs",
     "inspect_db_metrics",
     "inspect_deploy_history",
+    "inspect_network_topology",   # new: BGP / routing layer
+    "inspect_memory_profile",     # new: heap / OOM diagnosis
+    "inspect_disk_usage",         # new: filesystem saturation
+
+    # ── Mitigations ────────────────────────────────────────────────────────
     "rollback_auth_deploy",
+    "rollback_service_deploy",    # new: generic service rollback (non-auth)
     "restart_auth_service",
     "scale_db_cluster",
     "flush_cache",
     "shift_traffic_canary",
-    "post_status_update",
-    "resolve_incident",
-    "no_op",
+    "withdraw_bgp_route",         # new: withdraw leaked BGP advertisement
+    "archive_old_logs",           # new: compress & remove old log files
+    "reduce_log_verbosity",       # new: dial logging back to INFO/WARN
 ]
 
 
@@ -41,6 +53,8 @@ class Observation(BaseModel):
     communication_log: List[str]
     recent_actions: List[str]
     available_actions: List[str]
+    # Partial-observability flag — set to True on hard mode
+    partial_observability: bool = False
 
 
 class Action(BaseModel):
