@@ -1,43 +1,60 @@
-"""FastAPI server for HF Space deployment — session-isolated with /score and /tasks."""
+"""FastAPI server — session-isolated with /episode, /demo, /leaderboard, partial obs."""
 
 import uuid
+import copy
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from env.environment import DevOpsEnv
-from env.models import Action
+from env.models import Action, VALID_ACTIONS
 from graders.grader import compute_score
 from tasks.task_config import TASK_CONFIGS
 
+import os, pathlib
 
 app = FastAPI(
     title="DevOps Incident Triage OpenEnv",
     description=(
         "An OpenEnv benchmark for SaaS production incident response. "
         "Agents investigate alerts, apply mitigations, communicate status, "
-        "and resolve incidents through a typed step/reset/state interface."
+        "and resolve incidents through a typed step/reset/state interface.\n\n"
+        "New in v3: network/memory_leak/disk_full task scenarios, "
+        "/episode replay, /demo auto-run, /leaderboard, partial observability."
     ),
-    version="2.0",
+    version="3.0",
 )
 
-# Session-isolated environments — keyed by session_id string.
-# This prevents concurrent users on the HF Space from corrupting each other's state.
-sessions: dict[str, DevOpsEnv] = {}
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
 
+sessions: dict[str, DevOpsEnv] = {}
 DEFAULT_SESSION = "default"
 
+# Leaderboard: task -> list of {session_id, score, steps, resolved}
+leaderboard: dict[str, list[dict]] = {t: [] for t in TASK_CONFIGS}
+
+# ---------------------------------------------------------------------------
+# Request models
+# ---------------------------------------------------------------------------
 
 class ResetRequest(BaseModel):
     task: Optional[str] = "easy"
     session_id: Optional[str] = DEFAULT_SESSION
+    partial_obs: Optional[bool] = False   # partial observability toggle
 
 
 class StepRequest(BaseModel):
-    name: str                                   # action name (mirrors Action model)
+    name: str
     session_id: Optional[str] = DEFAULT_SESSION
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _get_session(session_id: str) -> DevOpsEnv:
     env = sessions.get(session_id)
@@ -49,23 +66,43 @@ def _get_session(session_id: str) -> DevOpsEnv:
     return env
 
 
+def _record_leaderboard(session_id: str, env: DevOpsEnv) -> None:
+    """Push a finished episode onto the leaderboard for its task."""
+    task = env.task
+    score, _ = compute_score(task, env._state)
+    entry = {
+        "session_id": session_id,
+        "score": round(score, 4),
+        "steps": env._state.get("step_count", 0),
+        "resolved": env._state.get("resolved", False),
+        "partial_obs": env.partial_obs,
+    }
+    board = leaderboard.setdefault(task, [])
+    board.append(entry)
+    # Keep only top-20 per task, sorted by score desc
+    leaderboard[task] = sorted(board, key=lambda x: x["score"], reverse=True)[:20]
+
 # ---------------------------------------------------------------------------
-# Routes
+# Routes — core
 # ---------------------------------------------------------------------------
 
-@app.get("/")
-def root() -> dict:
-    return {"name": "devops_incident_triage_env", "status": "ok", "version": "2.0"}
+@app.get("/", response_class=HTMLResponse)
+def root():
+    """Serve the interactive web UI."""
+    ui_path = pathlib.Path(__file__).parent / "static" / "index.html"
+    if ui_path.exists():
+        return HTMLResponse(content=ui_path.read_text(encoding="utf-8"))
+    return HTMLResponse(content="<h1>DevOps Incident Triage OpenEnv v3</h1><p>Visit /docs</p>")
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "healthy", "active_sessions": len(sessions)}
+    return {"status": "healthy", "active_sessions": len(sessions), "version": "3.0"}
 
 
 @app.get("/tasks")
 def list_tasks() -> dict:
-    """List all available task names and their descriptions."""
+    """List all available task scenarios."""
     return {
         "tasks": [
             {
@@ -82,9 +119,10 @@ def list_tasks() -> dict:
 
 @app.post("/reset")
 def reset(request: ResetRequest | None = None) -> dict:
-    """Reset (or create) a session with the chosen task."""
+    """Reset (or create) a session. Accepts task, session_id, and partial_obs flag."""
     task_name = (request.task if request else None) or "easy"
     session_id = (request.session_id if request else None) or DEFAULT_SESSION
+    partial_obs = (request.partial_obs if request else None) or False
 
     if task_name not in TASK_CONFIGS:
         raise HTTPException(
@@ -92,7 +130,7 @@ def reset(request: ResetRequest | None = None) -> dict:
             detail=f"Unknown task '{task_name}'. Choose from {list(TASK_CONFIGS)}",
         )
 
-    env = DevOpsEnv(task=task_name)
+    env = DevOpsEnv(task=task_name, partial_obs=partial_obs)
     observation = env.reset()
     sessions[session_id] = env
 
@@ -100,6 +138,7 @@ def reset(request: ResetRequest | None = None) -> dict:
         "session_id": session_id,
         "observation": observation,
         "done": False,
+        "partial_obs": partial_obs,
     }
 
 
@@ -109,16 +148,15 @@ def step(request: StepRequest) -> dict:
     session_id = request.session_id or DEFAULT_SESSION
     env = _get_session(session_id)
 
-    # Validate the action via the Action model (raises ValueError for invalid)
     try:
         Action(name=request.name)
     except Exception:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid action '{request.name}'.",
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid action '{request.name}'.")
 
     observation, reward, done, info = env.step(request.name)
+
+    if done:
+        _record_leaderboard(session_id, env)
 
     return {
         "session_id": session_id,
@@ -131,16 +169,14 @@ def step(request: StepRequest) -> dict:
 
 @app.get("/state")
 def state(session_id: str = Query(default=DEFAULT_SESSION)) -> dict:
-    """Return the current observation snapshot for the given session."""
+    """Return the current observation snapshot."""
     env = _get_session(session_id)
     return env.state()
 
 
 @app.get("/score")
 def score(session_id: str = Query(default=DEFAULT_SESSION)) -> dict:
-    """Return the current score breakdown for the given session.
-    Useful for judges and demos to inspect the scoring live.
-    """
+    """Return the live score breakdown for a session."""
     env = _get_session(session_id)
     total_score, breakdown = compute_score(env.task, env._state)
     return {
@@ -151,4 +187,96 @@ def score(session_id: str = Query(default=DEFAULT_SESSION)) -> dict:
         "resolved": env._state.get("resolved", False),
         "step_count": env._state.get("step_count", 0),
         "max_steps": env.max_steps,
+    }
+
+# ---------------------------------------------------------------------------
+# Routes — new
+# ---------------------------------------------------------------------------
+
+@app.get("/episode")
+def episode(session_id: str = Query(default=DEFAULT_SESSION)) -> dict:
+    """Return the full episode trace — all steps, rewards, final score.
+
+    Use this to replay exactly what the agent did, step by step.
+    The trajectory list contains one entry per step with:
+      step, action, reward, done, observation snapshot.
+    """
+    env = _get_session(session_id)
+    return {
+        "session_id": session_id,
+        **env.episode(),
+    }
+
+
+@app.get("/demo")
+def demo(task: str = Query(default="easy"), partial_obs: bool = Query(default=False)) -> dict:
+    """Run the optimal policy automatically and return the full trajectory as JSON.
+
+    Perfect for judges who want to see a complete solved episode in one HTTP call.
+    The agent follows the task's pre-defined optimal_actions sequence.
+    """
+    if task not in TASK_CONFIGS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown task '{task}'. Choose from {list(TASK_CONFIGS)}",
+        )
+
+    session_id = f"demo_{task}_{uuid.uuid4().hex[:6]}"
+    env = DevOpsEnv(task=task, partial_obs=partial_obs)
+    env.reset()
+    sessions[session_id] = env
+
+    optimal = TASK_CONFIGS[task]["optimal_actions"]
+    steps_log = []
+    total_reward = 0.0
+
+    for action in optimal:
+        obs, reward, done, info = env.step(action)
+        total_reward = round(total_reward + reward, 4)
+        steps_log.append({
+            "step": env.current_step,
+            "action": action,
+            "reward": reward,
+            "done": done,
+            "score": info.get("score"),
+            "breakdown": info.get("breakdown"),
+            "info": {k: v for k, v in info.items() if k not in {"score", "breakdown"}},
+        })
+        if done:
+            break
+
+    _record_leaderboard(session_id, env)
+    final_score, breakdown = compute_score(task, env._state)
+
+    return {
+        "session_id": session_id,
+        "task": task,
+        "partial_obs": partial_obs,
+        "policy": "optimal",
+        "total_reward": total_reward,
+        "final_score": round(final_score, 4),
+        "score_breakdown": {k: round(v, 4) for k, v in breakdown.items()},
+        "resolved": env._state.get("resolved", False),
+        "steps": steps_log,
+    }
+
+
+@app.get("/leaderboard")
+def get_leaderboard(task: str = Query(default=None)) -> dict:
+    """Return the best scores per task across all sessions.
+
+    Pass ?task=easy to filter to a single task.
+    """
+    if task is not None:
+        if task not in TASK_CONFIGS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown task '{task}'. Choose from {list(TASK_CONFIGS)}",
+            )
+        return {"task": task, "leaderboard": leaderboard.get(task, [])}
+
+    return {
+        "leaderboard": {
+            t: entries[:10] for t, entries in leaderboard.items() if entries
+        }
     }
