@@ -1,13 +1,17 @@
 """
 Training script for the DevOps Incident Triage Environment.
-Uses Unsloth + TRL (GRPO) to iteratively train a small language model.
+Uses Unsloth + TRL for a two-phase training pipeline:
 
-Curriculum design:
-  - 20 prompts from easy task initial state
-  - 20 prompts from medium task initial state
-  - 10 prompts from hard task initial state
-  - 10 mid-episode prompts (1-2 random steps taken first)
-  Shuffled before training.
+Phase 1 — SFT Warm-start (NEW)
+  1 epoch of supervised fine-tuning on the optimal action sequences from all
+  6 task scenarios.  This gives the model a non-random starting policy so that
+  GRPO receives non-zero rewards from step 1.
+
+Phase 2 — GRPO RL Training
+  Curriculum design (all 6 tasks):
+    - 15 prompts per task initial state  (easy/medium/hard/network/memory_leak/disk_full)
+    - 15 mid-episode prompts (1-2 random steps taken first across all tasks)
+  Shuffled before training.  max_steps bumped to 200 for a more visible reward curve.
 
 Reward functions:
   1. format_reward_func         — valid action string check
@@ -202,35 +206,69 @@ def _make_prompt(state: dict) -> dict:
     }
 
 
-def generate_prompts(
-    easy_n: int = 20,
-    medium_n: int = 20,
-    hard_n: int = 10,
-    mid_episode_n: int = 10,
-    seed: int = 42,
-) -> Dataset:
-    """Generate a curriculum-mixed prompt dataset.
+def generate_sft_dataset(seed: int = 42) -> Dataset:
+    """Generate a supervised fine-tuning dataset from optimal action sequences.
 
-    Distribution:
-      - easy_n   : easy task initial states
-      - medium_n : medium task initial states
-      - hard_n   : hard task initial states
-      - mid_episode_n : states captured after 1-2 random valid steps
+    For each of the 6 tasks we replay the full optimal trajectory and record
+    every (observation, optimal_next_action) pair as a prompt/completion.
+    This gives the model a strong starting policy before GRPO kicks in.
     """
     random.seed(seed)
     data = []
 
-    for task, count in [("easy", easy_n), ("medium", medium_n), ("hard", hard_n)]:
+    for task_name, config in TASK_CONFIGS.items():
+        optimal_actions = config.get("optimal_actions", [])
+        if not optimal_actions:
+            continue
+
+        env = DevOpsEnv(task=task_name)
+        state = env.reset()
+
+        for action in optimal_actions:
+            prompt = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": json.dumps(state)},
+            ]
+            # SFT target: the optimal action at this point in the episode
+            data.append({
+                "prompt": prompt,
+                "completion": [{"role": "assistant", "content": action}],
+            })
+            state, _, done, _ = env.step(action)
+            if done:
+                break
+
+    random.shuffle(data)
+    print(f"  SFT dataset: {len(data)} (state, optimal_action) pairs across all 6 tasks.")
+    return Dataset.from_list(data)
+
+
+def generate_prompts(
+    per_task_n: int = 15,
+    mid_episode_n: int = 15,
+    seed: int = 42,
+) -> Dataset:
+    """Generate a curriculum-mixed prompt dataset for GRPO.
+
+    Distribution:
+      - per_task_n prompts per task initial state (all 6 tasks)
+      - mid_episode_n : states captured after 1-2 random valid steps
+    """
+    random.seed(seed)
+    data = []
+    all_tasks = list(TASK_CONFIGS.keys())
+
+    # Initial states for every task
+    for task in all_tasks:
         env = DevOpsEnv(task=task)
         state = env.reset()
-        for _ in range(count):
+        for _ in range(per_task_n):
             data.append(_make_prompt(state))
 
     # Mid-episode states — vary task and number of warm-up steps
-    tasks = ["easy", "medium", "hard"]
     for _ in range(mid_episode_n):
-        task = random.choice(tasks)
-        n_warm = random.randint(1, 2)
+        task = random.choice(all_tasks)
+        n_warm = random.randint(1, 3)
         env = DevOpsEnv(task=task)
         state = env.reset()
         for _ in range(n_warm):
@@ -242,7 +280,7 @@ def generate_prompts(
         data.append(_make_prompt(state))
 
     random.shuffle(data)
-    print(f"  Dataset: {len(data)} prompts across easy/medium/hard + mid-episode states.")
+    print(f"  GRPO dataset: {len(data)} prompts across {len(all_tasks)} tasks + mid-episode states.")
     return Dataset.from_list(data)
 
 
@@ -253,11 +291,11 @@ def generate_prompts(
 def main():
     # GPU-only imports — kept here so the module can be imported without a GPU
     import torch  # noqa: F401
-    from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments  # noqa: F401
+    from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
     from unsloth import FastLanguageModel, PatchDPOTrainer
-    from trl import GRPOTrainer, GRPOConfig
+    from trl import GRPOTrainer, GRPOConfig, SFTTrainer, SFTConfig
 
-    print("[1] Loading Unsloth Model Space...")
+    print("[1] Loading Unsloth Model...")
     PatchDPOTrainer()  # Required optimisations
 
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -276,15 +314,57 @@ def main():
         use_gradient_checkpointing="unsloth",
     )
 
-    print("[2] Generating Curriculum Prompts for Environment...")
-    dataset = generate_prompts()
+    # ── Phase 1: SFT Warm-start ────────────────────────────────────────────
+    # Run 1 epoch of supervised fine-tuning on optimal action sequences.
+    # This gives GRPO a non-random starting policy so rewards are non-zero
+    # from the very first update step.
+    print("[2] Phase 1 — SFT Warm-start on optimal trajectories...")
+    sft_dataset = generate_sft_dataset()
 
-    print("[3] Setting up GRPO Config...")
+    def format_sft_sample(example):
+        """Convert prompt+completion into a single flat text for SFT."""
+        messages = example["prompt"] + example["completion"]
+        return {"text": tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False
+        )}
+
+    sft_dataset = sft_dataset.map(format_sft_sample)
+
+    sft_args = SFTConfig(
+        output_dir="outputs_sft",
+        num_train_epochs=1,
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=4,
+        learning_rate=2e-4,
+        lr_scheduler_type="cosine",
+        logging_steps=1,
+        dataset_text_field="text",
+        max_seq_length=MAX_SEQ_LENGTH,
+        fp16=not torch.cuda.is_bf16_supported(),
+        bf16=torch.cuda.is_bf16_supported(),
+    )
+
+    sft_trainer = SFTTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        args=sft_args,
+        train_dataset=sft_dataset,
+    )
+
+    print("  Running SFT warm-start epoch...")
+    sft_trainer.train()
+    print("  SFT warm-start complete.")
+
+    # ── Phase 2: GRPO RL Training ──────────────────────────────────────────
+    print("[3] Phase 2 — Generating GRPO Curriculum (all 6 tasks)...")
+    grpo_dataset = generate_prompts()
+
+    print("[4] Setting up GRPO Config (max_steps=200)...")
     training_args = GRPOConfig(
         output_dir="outputs_grpo",
         learning_rate=1e-5,
         lr_scheduler_type="cosine",
-        max_steps=100,
+        max_steps=200,           # doubled from 100 for a more visible reward curve
         per_device_train_batch_size=2,
         gradient_accumulation_steps=4,
         logging_steps=1,
@@ -301,17 +381,17 @@ def main():
             format_reward_func,
             step_reward_func,
             anti_cheat_reward_func,
-            task_alignment_reward_func,   # 4th independent reward signal
+            task_alignment_reward_func,
         ],
         args=training_args,
-        train_dataset=dataset,
+        train_dataset=grpo_dataset,
         callbacks=[RewardLoggerCallback()],
     )
 
-    print("[4] Beginning RL Training Loop...")
+    print("[5] Beginning GRPO RL Training Loop...")
     trainer.train()
 
-    print("[5] Saving Model properly (Phase 9 Checklist)...")
+    print("[6] Saving merged model...")
     model.save_pretrained_merged("trained_sre_agent", tokenizer, save_method="merged_16bit")
     print(f"Training Complete! Reward log saved to {REWARD_LOG_PATH}")
 
