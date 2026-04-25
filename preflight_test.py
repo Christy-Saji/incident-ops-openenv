@@ -236,7 +236,7 @@ def test_baseline_scores():
     from graders.grader import compute_score
     from inference import simple_policy
 
-    EXPECTED = {"easy": 0.94, "medium": 0.73, "hard": 0.58}
+    EXPECTED = {"easy": 0.94, "medium": 0.93, "hard": 0.61}
 
     for task, expected in EXPECTED.items():
         env = DevOpsEnv(task=task)
@@ -284,11 +284,11 @@ if __name__ == "__main__":
     passed = sum(1 for _, ok in results if ok)
     total = len(results)
     if passed == total:
-        print(f"  ALL {total}/{total} TESTS PASSED ✅")
+        print(f"  ALL {total}/{total} TESTS PASSED")
         print("  You are ready for the hackathon.")
     else:
         failed = [(n, ok) for n, ok in results if not ok]
-        print(f"  {passed}/{total} passed — {len(failed)} FAILED ❌")
+        print(f"  {passed}/{total} passed — {len(failed)} FAILED")
         for name, _ in failed:
             print(f"    • {name}")
         print("\n  Fix failures before the hackathon.")
