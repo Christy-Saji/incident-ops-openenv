@@ -23,9 +23,15 @@ from env.models import VALID_ACTIONS
 from graders.grader import compute_score
 
 SYSTEM_PROMPT = (
-    "You are an On-call SRE. Pick exactly one action from the valid actions.\n"
-    "Valid actions: {}\n"
-    "Do not explain your reasoning. Just output the action word."
+    "You are an On-call SRE resolving a live infrastructure incident. "
+    "Select the single NEXT best action to take.\n"
+    "Valid actions: {}\n\n"
+    "Rules:\n"
+    "1. NEVER repeat an action that already appears in 'actions_taken' or 'recent_actions'.\n"
+    "2. Follow the SRE workflow in order: DIAGNOSE first, then MITIGATE, then COMMUNICATE "
+    "(post_status_update), then RESOLVE.\n"
+    "3. Only call resolve_incident when all services are running and mitigations are done.\n"
+    "Output ONLY the action name. No explanation."
 ).format(", ".join(VALID_ACTIONS))
 
 TASKS = ["easy", "medium", "hard", "network", "memory_leak", "disk_full"]
@@ -122,15 +128,26 @@ def _generate_action_hf_api(model_id: str, hf_token: str, state: dict) -> str:
 
 
 def _generate_action(model, tokenizer, state: dict) -> str:
-    """Run one greedy forward pass and extract an action."""
+    """Run one greedy forward pass and extract an action.
+
+    Injects a dynamic forbidden-actions line after the state JSON so the
+    model sees already-taken actions explicitly even if it fails to parse
+    the full JSON observation.
+    """
     import torch
+
+    # Build a forbidden-actions hint from the live episode state
+    already_done: list = state.get("actions_taken", state.get("recent_actions", []))
+    if already_done:
+        forbidden_hint = f"\n\nFORBIDDEN (already used, do not repeat): {', '.join(already_done)}"
+    else:
+        forbidden_hint = ""
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": json.dumps(state)},
+        {"role": "user",   "content": json.dumps(state) + forbidden_hint},
     ]
 
-    # Use the tokenizer's chat template
     text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
@@ -141,13 +158,12 @@ def _generate_action(model, tokenizer, state: dict) -> str:
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=32,   # match training max_completion_length=32
+            max_new_tokens=32,
             do_sample=False,
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
         )
 
-    # Decode only the newly generated tokens
     new_ids = output_ids[0][inputs["input_ids"].shape[1]:]
     raw = tokenizer.decode(new_ids, skip_special_tokens=True)
     action = _extract_action(raw)
@@ -188,8 +204,9 @@ def run_episode(
             last_action = action
 
         # Tiny evaluation-time penalty + fail-fast if model loops same action.
-        # This prevents long "spam" traces from dominating logs.
-        if repeat_streak >= 3 and not state.get("resolved", False):
+        # Raised from 3 → 5 so the model has more room to self-correct mid-episode
+        # before we call it a hard loop and bail.
+        if repeat_streak >= 5 and not state.get("resolved", False):
             loop_penalty += 0.03
             print(
                 f"    step={step_num:2d}  action={action:<28s}  reward={reward:+.2f}  "

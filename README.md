@@ -8,245 +8,209 @@ app_file: app.py
 pinned: false
 ---
 
-# 🚨 DevOps Incident Response — SRE Agent OpenEnv
+# Incident Ops OpenEnv
 
-**OpenEnv Hackathon 2026 · Theme #3 — World Modeling · Sub-theme #3.1 — Professional Tasks**
+OpenEnv Hackathon 2026  
+Theme 3 - World Modeling  
+Sub-theme 3.1 - Professional Tasks
 
-[![OpenEnv](https://img.shields.io/badge/OpenEnv-v3.0-6366f1?style=flat-square)](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv)
-[![Theme](https://img.shields.io/badge/Theme-World%20Modeling%20%233.1-a855f7?style=flat-square)](#)
-[![Tasks](https://img.shields.io/badge/tasks-6-22c55e?style=flat-square)](#tasks)
-[![Actions](https://img.shields.io/badge/actions-19-f59e0b?style=flat-square)](#action-space)
-[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](#-training-notebook)
+[Live Hugging Face Space](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv)  
+[Open in Colab](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/main/colab_training.ipynb)  
+[Training Notebook in Repo](./colab_training.ipynb)
 
-> **Links:** [🤗 Live Space](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv) · [📓 Colab Notebook](#-training-notebook) · [📝 HuggingFace Blog Post](#) <!-- TODO: add blog post link -->
----
+Incident Ops is an OpenEnv benchmark for training an LLM to behave like an on-call SRE during live production incidents. The agent has to inspect evidence, choose targeted mitigations, communicate status, and resolve only when the system is actually stable. The environment is designed to punish shallow tool spam and reward correct sequential incident handling.
 
-## The Theme
+## Why This Is Interesting
 
- Theme #3 — World Modeling · Sub-theme #3.1 — Professional Tasks
- 
----
+Most agent benchmarks still look like games, puzzles, or static QA. This environment instead targets a professional workflow with:
 
-## The Problem
+- Partial observability
+- Typed actions with real failure modes
+- Multiple incident families, not one narrow task
+- Reward hacking traps such as safe no-op loops or premature resolution
+- A training loop that can show real before/after behavior change
 
-LLMs are surprisingly bad on-call SREs. Give a frontier model a production incident and it will either:
+This matters because production incident response is exactly the kind of high-pressure, tool-using, multi-step work where "sounds smart" is not enough.
 
-- **Spam safe no-op actions** (`acknowledge_incident` over and over) because they earn a small reward without risk
-- **Jump straight to resolution** without diagnosing the root cause first
-- **Apply the wrong mitigation** — it can't distinguish a BGP route leak from an auth-service regression
+## Environment Design
 
-This environment was built to measure and close that gap. The core challenge: can RL training teach a small (1B-parameter) language model to reason sequentially under partial observability in a professional tool-use domain?
+The agent receives a structured observation each step containing the incident title, customer impact, phase, active alerts, service health, metrics, findings, recent actions, and the available action set.
 
-This is underexplored territory. A human SRE would triage most of these incidents in minutes. An untuned LLM cannot.
+The action space contains 19 typed actions:
 
----
+- Universal: `acknowledge_incident`, `post_status_update`, `resolve_incident`, `no_op`
+- Diagnostics: `inspect_auth_logs`, `inspect_db_metrics`, `inspect_deploy_history`, `inspect_network_topology`, `inspect_memory_profile`, `inspect_disk_usage`
+- Mitigations: `rollback_auth_deploy`, `rollback_service_deploy`, `restart_auth_service`, `scale_db_cluster`, `flush_cache`, `shift_traffic_canary`, `withdraw_bgp_route`, `archive_old_logs`, `reduce_log_verbosity`
 
-## The Environment
+The reward is dense and compositional. It combines diagnosis quality, mitigation completion, recovery quality, communication quality, efficiency, and harmful-action penalties. The GRPO training pipeline also adds action-format, anti-loop, task-alignment, sequence-order, progress-delta, communication-gate, and terminal-outcome reward signals.
 
-### What does the agent see?
+The point is not just "get to done." The point is to teach the model the right order:
 
-Each step the agent receives a JSON observation with:
+`diagnose -> mitigate -> communicate -> resolve`
 
-| Field | Description |
-|---|---|
-| `incident_title` | Human-readable incident title |
-| `customer_impact` | Plain-English description of user impact |
-| `incident_phase` | `investigating` / `monitoring` / `resolved` |
-| `active_alerts` | Currently firing alerts |
-| `service_status` | `running` or `degraded` per service (auth, api, db, cache, network) |
-| `metrics` | cpu, memory, latency_ms, error_rate, request_rate |
-| `known_findings` | Accumulated diagnostic clues — **hidden in partial-observability mode** |
-| `recent_actions` | Last 5 actions taken |
+## Task Set
 
-### What does the agent do?
+The environment currently includes six deterministic incident scenarios:
 
-The agent picks exactly one action per step from a set of 19 typed actions:
+| Task | Scenario | Core skill being tested |
+| --- | --- | --- |
+| `easy` | Auth deploy regression | Detect bad deploy and roll back cleanly |
+| `medium` | DB saturation from traffic spike | Read metrics and apply capacity mitigation |
+| `hard` | Cascading outage after auth deploy | Multi-step diagnosis plus coordinated mitigations |
+| `network` | BGP route leak | Network reasoning and routing mitigation |
+| `memory_leak` | OOM kill restart loop | Infer memory failure and roll back bad service deploy |
+| `disk_full` | Log disk saturation | Diagnose infra pressure and preserve audit-safe recovery |
 
-**Diagnostics** — `inspect_auth_logs`, `inspect_db_metrics`, `inspect_deploy_history`, `inspect_network_topology`, `inspect_memory_profile`, `inspect_disk_usage`
+These tasks are intentionally different enough that the model cannot win by memorizing one diagnostic habit.
 
-**Mitigations** — `rollback_auth_deploy`, `rollback_service_deploy`, `restart_auth_service`, `scale_db_cluster`, `flush_cache`, `shift_traffic_canary`, `withdraw_bgp_route`, `archive_old_logs`, `reduce_log_verbosity`
+## Training Pipeline
 
-**Universal** — `acknowledge_incident`, `post_status_update`, `resolve_incident`, `no_op`
+The repo includes a full end-to-end training pipeline in [train.py](./train.py) and a rerunnable notebook in [colab_training.ipynb](./colab_training.ipynb).
 
-### What does the agent get rewarded for?
+Pipeline:
 
-Per-step reward = score delta with explicit penalties across 5 dimensions:
+1. SFT warm-start on optimal trajectories from all six tasks
+2. GRPO RL fine-tuning against the live environment
+3. Reward logging to `outputs_grpo/reward_log.csv`
+4. Reward curve export to `reward_curve.png`
+5. Before/after evaluation with [compare_inference.py](./compare_inference.py)
 
-| Component | Notes |
-|---|---|
-| Diagnosis (0.20–0.25) | Fraction of required diagnostics completed |
-| Mitigation (0.25–0.35) | Fraction of required mitigations applied |
-| Recovery (0.25) | Service status + latency/error/cpu/memory metrics |
-| Communication (0.10–0.15) | Richness-aware: penalises low-content status updates |
-| Efficiency (0.05–0.10) | Penalised for excess steps; halved if incident unresolved |
-| Harm penalty | Ratio-based: harmful_action_count / total_steps |
+Default training model:
 
-**What makes the reward hard to game:** An agent that spams `acknowledge_incident` scores ~0.21. An agent that spams any single diagnostic scores ~0.20–0.36 depending on task match. Only an agent that sequences correctly — diagnose → mitigate → communicate → resolve — achieves scores above 0.70.
+- `unsloth/Llama-3.2-1B-Instruct`
 
-### Tasks
+Default full-run settings:
 
-Six deterministic incident scenarios across fundamentally different failure modes:
+- `GRPO_MAX_STEPS=300`
+- `GRPO_PER_TASK_PROMPTS=8`
+- `GRPO_MID_EPISODE_PROMPTS=60`
 
-| Task | Scenario | Key Actions Required | Expected Steps |
-|---|---|---|---|
-| `easy` | Auth deploy regression — login failures | inspect deploy → rollback | 4 |
-| `medium` | DB saturation from flash-sale traffic spike | inspect DB → scale + shift traffic | 6 |
-| `hard` | Cascading outage — multi-service retry storm | 3 inspects + 3 mitigations | 9 |
-| `network` | BGP route leak — global latency spike | inspect topology → withdraw route | 7 |
-| `memory_leak` | OOM kills — pod restart loops | inspect memory → rollback service | 7 |
-| `disk_full` | Log disk saturation — API writes blocked | inspect disk → archive + reduce verbosity | 7 |
-
-**Partial observability mode:** pass `partial_obs: true` in `/reset` to hide `known_findings` from the observation. The agent must reason from raw alerts and metrics alone.
-
----
-
-## Training
-
-**Pipeline:** SFT warm-start (1 epoch on optimal trajectories across all 6 tasks) → GRPO RL (300 steps, 5 reward signals)
-
-**Model:** `unsloth/Llama-3.2-1B-Instruct` with 4-bit quantisation + LoRA (rank 16)
-
-**Reward signals (5):**
-1. `format_reward_func` — valid action string check (+0.3 / -0.5)
-2. `step_reward_func` — environment step reward with mid-episode state reconstruction
-3. `anti_cheat_reward_func` — penalises filler action spam (`acknowledge_incident`, `no_op`)
-4. `task_alignment_reward_func` — strong bonus (+0.8) for task-correct diagnostic or mitigation
-5. `sequence_progress_reward_func` — bonus for completing diagnosis before attempting mitigation
-
-**Re-run training:**
-
-[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/main/colab_training.ipynb)
-
----
+The notebook also includes a short sanity-run path before the full run, which makes it easier for judges to verify the pipeline quickly.
 
 ## Results
 
 ### Reward Curve
 
-![GRPO Training Reward Curve](reward_curve.png)
-*Overall reward across 300 GRPO training steps. Reward rises from ~0.5 → ~1.75, a 3.5× improvement over the course of training.*
+![Reward Curve](./reward_curve.png)
 
-### Before vs. After
+`reward_curve.png` is committed to the repo so the main training trend is visible even outside Colab.
 
-<!-- TODO: fill in after final training run -->
+### Before vs After Evaluation
 
-| Task | Base Score | Trained Score | Δ |
-|---|---|---|---|
-| `easy` | — | — | — |
-| `medium` | — | — | — |
-| `hard` | — | — | — |
-| `network` | — | — | — |
-| `memory_leak` | — | — | — |
-| `disk_full` | — | — | — |
-| **Average** | — | — | — |
+Use this command after training:
 
-### Optimal Policy Scores (upper bound)
+```bash
+python compare_inference.py ^
+  --base-model unsloth/Llama-3.2-1B-Instruct ^
+  --trained-model ./trained_sre_agent
+```
 
-| Task | Score | Notes |
-|---|---|---|
-| `easy` | 0.94 | Correct rollback and clean resolution |
-| `medium` | 0.73 | Mitigates but leaves efficiency on the table |
-| `hard` | 0.58 | Handles main mitigations, partial recovery |
-| `network` | 0.89 | BGP withdrawal + traffic shift resolves cleanly |
-| `memory_leak` | 0.85 | Rollback + DB scale resolves OOM loop |
-| `disk_full` | 0.87 | Archive + verbosity reduction clears disk pressure |
+This evaluates the untrained base model and the GRPO-trained model on all six tasks and prints a side-by-side comparison table. Fill the table below with the output from your final submission run:
 
----
+| Task | Base score | Trained score | Delta |
+| --- | --- | --- | --- |
+| `easy` | pending | pending | pending |
+| `medium` | pending | pending | pending |
+| `hard` | pending | pending | pending |
+| `network` | pending | pending | pending |
+| `memory_leak` | pending | pending | pending |
+| `disk_full` | pending | pending | pending |
+| `average` | pending | pending | pending |
 
-## Why Does This Matter?
+### Demo Endpoints
 
-Every SaaS company relies on humans being on-call 24/7. Automated agents that can triage production incidents, apply targeted mitigations, and communicate status could meaningfully reduce MTTR (mean time to resolve) and on-call burden.
+The environment exposes:
 
-This benchmark provides:
-- A **reproducible evaluation harness** for measuring LLM incident-response capability
-- A **training environment** where RL produces measurable skill improvement
-- A **partial-observability mode** that stress-tests agent reasoning under realistic uncertainty
-- A **domain** that is underexplored in RL/LLM research — most benchmarks use games or code, not operational tooling
+- `POST /reset`
+- `POST /step`
+- `GET /state`
+- `GET /score`
+- `GET /episode`
+- `GET /demo`
+- `GET /leaderboard`
+- `GET /tasks`
+- `GET /health`
 
----
+`/demo` runs a live policy rollout. When model credentials are configured it uses the LLM policy; otherwise it falls back to the built-in heuristic baseline and labels the result accordingly.
 
 ## Quick Start
+
+### Local run
 
 ```bash
 pip install -r requirements.txt
 uvicorn app:app --host 0.0.0.0 --port 7860
-# Open http://localhost:7860 for the interactive UI
 ```
 
+Then open `http://localhost:7860`.
+
+### Training
+
 ```bash
-# Run one episode with the baseline policy
-python inference.py
+pip install -r requirements-train.txt
+set GRPO_MAX_STEPS=300
+python train.py
+```
 
-# Compare base model vs trained model
-python compare_inference.py \
-    --base-model unsloth/Llama-3.2-1B-Instruct \
-    --trained-model ./trained_sre_agent
+### Evaluation
 
-# Run against any OpenAI-compatible model (e.g. via HF router)
-HF_TOKEN=hf_... MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct python inference.py
+```bash
+python compare_inference.py
 ```
 
 ### Docker
 
 ```bash
-docker build -t devops-openenv .
-docker run --rm -p 7860:7860 devops-openenv
+docker build -t incident-ops-openenv .
+docker run --rm -p 7860:7860 incident-ops-openenv
 ```
 
----
+## Colab Notebook
 
-## API Reference
+The repository includes [colab_training.ipynb](./colab_training.ipynb), which does the following:
 
-| Route | Method | Description |
-|---|---|---|
-| `/` | GET | Interactive web UI |
-| `/reset` | POST | Start session. Body: `{task, session_id, partial_obs}` |
-| `/step` | POST | Apply action. Body: `{name, session_id}` |
-| `/state` | GET | Current observation. `?session_id=` |
-| `/score` | GET | Live score breakdown. `?session_id=` |
-| `/episode` | GET | Full episode trace with trajectory. `?session_id=` |
-| `/demo` | GET | Optimal policy auto-run. `?task=&partial_obs=` |
-| `/leaderboard` | GET | Best scores per task. `?task=` optional |
-| `/tasks` | GET | All task names + descriptions |
-| `/health` | GET | Health check |
+1. Installs the training dependencies
+2. Clones the repo
+3. Smoke-tests the environment and reward functions
+4. Runs a short GRPO sanity pass
+5. Runs the full SFT + GRPO training pipeline
+6. Generates `reward_curve.png`
+7. Runs the before/after comparison script
+8. Optionally pushes the trained model to Hugging Face Hub
 
----
+Direct Colab launch:
 
-## 📓 Training Notebook
+[https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/main/colab_training.ipynb](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/main/colab_training.ipynb)
 
-The full training pipeline (SFT warm-start → 300-step GRPO → before/after comparison) is in **`colab_training.ipynb`**.
+## Submission Checklist
 
-> **Open in Colab:** *(shared link — no GitHub login required)*
-> 🔗 **[Open Training Notebook](https://colab.research.google.com/drive/PLACEHOLDER)** ← *(link will be updated before submission)*
+This repo now covers the core technical submission pieces:
 
-**Requirements:** T4 GPU runtime · ~45 min end-to-end
+- OpenEnv environment with valid manifest: [openenv.yaml](./openenv.yaml)
+- Working training script: [train.py](./train.py)
+- Rerunnable Colab notebook: [colab_training.ipynb](./colab_training.ipynb)
+- Reward plot committed in repo: [reward_curve.png](./reward_curve.png)
+- Hugging Face Space link in README
+- Results/evaluation command in README
 
-**What the notebook does:**
-1. Installs dependencies + clones repo
-2. Smoke-tests all 6 tasks and 5 reward functions (no GPU needed)
-3. Runs a 5-step sanity train to prove the pipeline works (~2 min)
-4. Runs the full SFT warm-start + 300-step GRPO training (~40 min)
-5. Plots the reward curve and saves `reward_curve.png`
-6. Runs base model vs trained model comparison across all 6 tasks
+Before final submission, make sure to also add whichever public storytelling asset you want judges to open first:
 
----
+- Hugging Face blog post link, or
+- YouTube demo link, or
+- Public slide deck link
 
 ## Project Structure
 
-```
-app.py                  # FastAPI server
+```text
+app.py
+compare_inference.py
+colab_training.ipynb
 env/
-  environment.py        # OpenEnv core: reset / step / state
-  models.py             # Typed observation / action / reward models
 graders/
-  grader.py             # 5-dimension scorer with harm penalty
+inference.py
+openenv.yaml
+reward_curve.png
+static/
 tasks/
-  task_config.py        # 6 incident scenarios
-train.py                # Unsloth + GRPO training pipeline
-compare_inference.py    # Before/after comparison script
-inference.py            # Baseline + LLM inference runner
-colab_training.ipynb    # End-to-end Colab training notebook
-openenv.yaml            # OpenEnv v3 manifest
-Dockerfile
-requirements.txt
+train.py
 ```

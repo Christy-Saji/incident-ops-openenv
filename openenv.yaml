@@ -109,7 +109,7 @@ tasks:
     expected_steps: 6
   - name: hard
     description: Cascading multi-service outage triggered by a bad auth deploy.
-    expected_steps: 9
+    expected_steps: 10
   - name: network
     description: BGP route leak from upstream peer causing global latency spike.
     expected_steps: 7
@@ -136,7 +136,7 @@ interface:
   step: "POST /step — step(action) -> (observation, reward, done, info)"
   state: "GET /state — returns current observation snapshot."
   episode: "GET /episode — returns full episode trace with trajectory for replay."
-  demo: "GET /demo — runs optimal policy, returns complete solved trajectory as JSON."
+  demo: "GET /demo — runs a live LLM policy when configured, otherwise a labeled heuristic baseline rollout; returns the full trajectory as JSON."
   leaderboard: "GET /leaderboard — best scores per task across all sessions."
 
 server:

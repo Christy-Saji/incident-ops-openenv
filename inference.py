@@ -4,8 +4,14 @@ import json
 import os
 import re
 import time
+from typing import Any
 
-from openai import OpenAI
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OpenAI = Any  # type: ignore[misc,assignment]
+    OPENAI_AVAILABLE = False
 
 from env.environment import DevOpsEnv
 from env.models import VALID_ACTIONS
@@ -53,6 +59,34 @@ BASELINE_PLANS = {
         "rollback_auth_deploy",
         "scale_db_cluster",
         "shift_traffic_canary",
+        "flush_cache",
+        "post_status_update",
+        "resolve_incident",
+    ],
+    "network": [
+        "acknowledge_incident",
+        "inspect_network_topology",
+        "inspect_deploy_history",
+        "withdraw_bgp_route",
+        "shift_traffic_canary",
+        "post_status_update",
+        "resolve_incident",
+    ],
+    "memory_leak": [
+        "acknowledge_incident",
+        "inspect_memory_profile",
+        "inspect_deploy_history",
+        "rollback_service_deploy",
+        "scale_db_cluster",
+        "post_status_update",
+        "resolve_incident",
+    ],
+    "disk_full": [
+        "acknowledge_incident",
+        "inspect_disk_usage",
+        "inspect_deploy_history",
+        "archive_old_logs",
+        "reduce_log_verbosity",
         "post_status_update",
         "resolve_incident",
     ],
@@ -74,7 +108,23 @@ FALLBACK_ACTIONS = {
         "no_op",
     ],
     "hard": [
-        "restart_auth_service",
+        "flush_cache",
+        "post_status_update",
+        "no_op",
+    ],
+    "network": [
+        "inspect_auth_logs",
+        "post_status_update",
+        "no_op",
+    ],
+    "memory_leak": [
+        "inspect_auth_logs",
+        "post_status_update",
+        "no_op",
+    ],
+    "disk_full": [
+        "inspect_auth_logs",
+        "post_status_update",
         "no_op",
     ],
 }
@@ -198,27 +248,55 @@ def llm_policy(state: dict, client: OpenAI, model: str) -> tuple[str | None, str
     return None, f"llm_fallback:{last_error or 'unknown_error'}"
 
 
-def run_task(task_name: str, client: OpenAI | None, model: str | None) -> tuple[float, bool]:
-    env = DevOpsEnv(task=task_name)
+def create_openai_client_from_env() -> tuple[OpenAI | None, str | None]:
+    if not OPENAI_AVAILABLE:
+        return None, None
+
+    api_base = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+    model_name = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
+    api_key = (
+        os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("API_KEY")
+        or os.environ.get("HF_TOKEN")
+    )
+
+    if not api_base or not model_name:
+        return None, None
+
+    return OpenAI(base_url=api_base, api_key=api_key or "no-key"), model_name
+
+
+def run_episode(
+    task_name: str,
+    client: OpenAI | None = None,
+    model: str | None = None,
+    *,
+    partial_obs: bool = False,
+    stochastic: bool = False,
+) -> dict:
+    env = DevOpsEnv(task=task_name, partial_obs=partial_obs, stochastic=stochastic)
     state = env.reset()
     use_llm = client is not None and model is not None
 
-    print(f"[START] task={task_name} env=devops model={model if use_llm else 'baseline'}")
-
     rewards: list[str] = []
-    success = False
-    score = 0.0
+    steps: list[dict] = []
     repeat_streak = 0
     last_action = None
     loop_penalty = 0.0
+    policy_name = model if use_llm else "heuristic_baseline"
+
+    print(f"[START] task={task_name} env=devops model={policy_name}")
 
     for step_num in range(1, env.max_steps + 1):
         state["all_actions_taken"] = list(env._state["actions_taken"])
 
         action = None
         fallback_reason = None
+        action_source = "baseline"
         if use_llm:
             action, fallback_reason = llm_policy(state, client, model)
+            if action is not None:
+                action_source = "llm"
         if action is None:
             action = simple_policy(state)
 
@@ -231,6 +309,19 @@ def run_task(task_name: str, client: OpenAI | None, model: str | None) -> tuple[
         else:
             repeat_streak = 1
             last_action = action
+
+        step_record = {
+            "step": step_num,
+            "action": action,
+            "action_source": action_source,
+            "reward": reward,
+            "done": done,
+            "score": info.get("score"),
+            "breakdown": info.get("breakdown"),
+            "error": error_msg,
+            "observation": state,
+        }
+        steps.append(step_record)
 
         print(
             f"[STEP] step={step_num} action={action} reward={reward:.2f} "
@@ -245,7 +336,7 @@ def run_task(task_name: str, client: OpenAI | None, model: str | None) -> tuple[
         if done:
             break
 
-    score, _ = compute_score(task_name, env._state)
+    score, breakdown = compute_score(task_name, env._state)
     score = max(0.0, score - loop_penalty)
     success = env._state["resolved"]
 
@@ -254,21 +345,30 @@ def run_task(task_name: str, client: OpenAI | None, model: str | None) -> tuple[
         f"score={score:.2f} rewards={','.join(rewards)}"
     )
 
-    return score, success
+    return {
+        "task": task_name,
+        "policy": "llm" if use_llm else "heuristic_baseline",
+        "policy_label": policy_name,
+        "partial_obs": partial_obs,
+        "stochastic": stochastic,
+        "env": env,
+        "score": round(score, 4),
+        "resolved": success,
+        "steps_taken": len(steps),
+        "rewards": rewards,
+        "score_breakdown": {k: round(v, 4) for k, v in breakdown.items()},
+        "steps": steps,
+        "episode": env.episode(),
+    }
+
+
+def run_task(task_name: str, client: OpenAI | None, model: str | None) -> tuple[float, bool]:
+    result = run_episode(task_name, client, model)
+    return result["score"], result["resolved"]
 
 
 if __name__ == "__main__":
-    api_base = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
-    model_name = os.environ.get("MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
-    api_key = (
-        os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("API_KEY")
-        or os.environ.get("HF_TOKEN")
-    )
+    client, model_name = create_openai_client_from_env()
 
-    client = None
-    if api_base and model_name:
-        client = OpenAI(base_url=api_base, api_key=api_key or "no-key")
-
-    for task in ["easy", "medium", "hard"]:
+    for task in ["easy", "medium", "hard", "network", "memory_leak", "disk_full"]:
         run_task(task, client, model_name)

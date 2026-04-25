@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from env.environment import DevOpsEnv
 from env.models import Action, VALID_ACTIONS
 from graders.grader import compute_score
+from inference import create_openai_client_from_env, run_episode as run_policy_episode
 from tasks.task_config import TASK_CONFIGS
 
 import os, pathlib
@@ -100,12 +101,9 @@ def health() -> dict:
     return {"status": "healthy", "active_sessions": len(sessions), "version": "3.0"}
 
 
-CORE_TASKS = {"easy", "medium", "hard"}
-
-
 @app.get("/tasks")
 def list_tasks() -> dict:
-    """List the three core task scenarios (easy / medium / hard)."""
+    """List every available task scenario."""
     return {
         "tasks": [
             {
@@ -116,7 +114,6 @@ def list_tasks() -> dict:
                 "expected_steps": len(cfg.get("optimal_actions", [])),
             }
             for name, cfg in TASK_CONFIGS.items()
-            if name in CORE_TASKS
         ]
     }
 
@@ -214,10 +211,11 @@ def episode(session_id: str = Query(default=DEFAULT_SESSION)) -> dict:
 
 @app.get("/demo")
 def demo(task: str = Query(default="easy"), partial_obs: bool = Query(default=False)) -> dict:
-    """Run the optimal policy automatically and return the full trajectory as JSON.
+    """Run a real policy rollout and return the full trajectory as JSON.
 
-    Perfect for judges who want to see a complete solved episode in one HTTP call.
-    The agent follows the task's pre-defined optimal_actions sequence.
+    When API credentials are configured, this uses the live LLM policy.
+    Otherwise it falls back to the deterministic heuristic baseline and labels
+    the output accordingly.
     """
     if task not in TASK_CONFIGS:
         raise HTTPException(
@@ -226,42 +224,31 @@ def demo(task: str = Query(default="easy"), partial_obs: bool = Query(default=Fa
         )
 
     session_id = f"demo_{task}_{uuid.uuid4().hex[:6]}"
-    env = DevOpsEnv(task=task, partial_obs=partial_obs)
-    env.reset()
+    client, model_name = create_openai_client_from_env()
+    result = run_policy_episode(
+        task,
+        client,
+        model_name,
+        partial_obs=partial_obs,
+        stochastic=True,
+    )
+
+    env = result.pop("env")
     sessions[session_id] = env
-
-    optimal = TASK_CONFIGS[task]["optimal_actions"]
-    steps_log = []
-    total_reward = 0.0
-
-    for action in optimal:
-        obs, reward, done, info = env.step(action)
-        total_reward = round(total_reward + reward, 4)
-        steps_log.append({
-            "step": env.current_step,
-            "action": action,
-            "reward": reward,
-            "done": done,
-            "score": info.get("score"),
-            "breakdown": info.get("breakdown"),
-            "info": {k: v for k, v in info.items() if k not in {"score", "breakdown"}},
-        })
-        if done:
-            break
-
     _record_leaderboard(session_id, env)
-    final_score, breakdown = compute_score(task, env._state)
 
     return {
         "session_id": session_id,
         "task": task,
         "partial_obs": partial_obs,
-        "policy": "optimal",
-        "total_reward": total_reward,
-        "final_score": round(final_score, 4),
-        "score_breakdown": {k: round(v, 4) for k, v in breakdown.items()},
-        "resolved": env._state.get("resolved", False),
-        "steps": steps_log,
+        "stochastic": result["stochastic"],
+        "policy": result["policy"],
+        "policy_label": result["policy_label"],
+        "total_reward": round(sum(float(value) for value in result["rewards"]), 4),
+        "final_score": result["score"],
+        "score_breakdown": result["score_breakdown"],
+        "resolved": result["resolved"],
+        "steps": result["steps"],
     }
 
 

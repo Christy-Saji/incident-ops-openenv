@@ -175,6 +175,7 @@ TASK_CONFIGS = {
             "rollback_auth_deploy",
             "scale_db_cluster",
             "shift_traffic_canary",
+            "flush_cache",
         ],
         "good_followups": [
             "acknowledge_incident",
@@ -189,6 +190,7 @@ TASK_CONFIGS = {
             "rollback_auth_deploy",
             "scale_db_cluster",
             "shift_traffic_canary",
+            "flush_cache",
             "post_status_update",
             "resolve_incident",
         ],

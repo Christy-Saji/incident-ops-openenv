@@ -53,11 +53,20 @@ MODEL_ID = "unsloth/Llama-3.2-1B-Instruct"   # change both here AND in compare_i
 MAX_SEQ_LENGTH = 1024
 LORA_RANK = 32    # bumped from 16 → 32 for better expressivity at 1B scale
 REWARD_LOG_PATH = "outputs_grpo/reward_log.csv"
+GRPO_MAX_STEPS = int(os.environ.get("GRPO_MAX_STEPS", "300"))
+GRPO_PER_TASK_PROMPTS = int(os.environ.get("GRPO_PER_TASK_PROMPTS", "8"))
+GRPO_MID_EPISODE_PROMPTS = int(os.environ.get("GRPO_MID_EPISODE_PROMPTS", "60"))
 
 system_prompt = (
-    "You are an On-call SRE. Pick exactly one action from the valid actions.\n"
-    "Valid actions: {}\n"
-    "Do not explain your reasoning. Just output the action word."
+    "You are an On-call SRE resolving a live infrastructure incident. "
+    "Select the single NEXT best action to take.\n"
+    "Valid actions: {}\n\n"
+    "Rules:\n"
+    "1. NEVER repeat an action that already appears in 'actions_taken' or 'recent_actions'.\n"
+    "2. Follow the SRE workflow in order: DIAGNOSE first, then MITIGATE, then COMMUNICATE "
+    "(post_status_update), then RESOLVE.\n"
+    "3. Only call resolve_incident when all services are running and mitigations are done.\n"
+    "Output ONLY the action name. No explanation."
 ).format(", ".join(VALID_ACTIONS))
 
 
@@ -88,6 +97,42 @@ def _extract_action(text: str) -> str | None:
     return best_action
 
 
+def _extract_state_from_prompt(prompt: list[dict]) -> dict:
+    """Best-effort parse of the user-state JSON from a chat prompt."""
+    try:
+        if not prompt:
+            return {}
+        return json.loads(prompt[-1]["content"])
+    except Exception:
+        return {}
+
+
+def _replay_env_from_prompt(prompt: list[dict]) -> tuple[DevOpsEnv, dict, str]:
+    """Reconstruct approximate environment state by replaying prompt history.
+
+    Preference order for replayed history:
+      1) actions_taken  (full episode history)
+      2) recent_actions (short sliding window fallback)
+    """
+    state_dict = _extract_state_from_prompt(prompt)
+    task = state_dict.get("task", "easy")
+    if task not in TASK_CONFIGS:
+        task = "easy"
+
+    env = DevOpsEnv(task=task)
+    env.reset()
+
+    history = state_dict.get("actions_taken", state_dict.get("recent_actions", []))
+    if not isinstance(history, list):
+        history = []
+
+    for prev_action in history:
+        if prev_action in VALID_ACTIONS:
+            env.step(prev_action)
+
+    return env, state_dict, task
+
+
 # ---------------------------------------------------------------------------
 # 1. Reward Functions (4 independent signals)
 # ---------------------------------------------------------------------------
@@ -95,7 +140,7 @@ def _extract_action(text: str) -> str | None:
 def format_reward_func(prompts, completions, **kwargs) -> List[float]:
     """Reward 1: Did the model output a single valid action string?
 
-    Reduced from 1.0 → 0.3 so this baseline signal no longer dominates
+    Reduced from 1.0 → 0.1 so this baseline signal no longer dominates
     the task-specific rewards and the model has a real incentive to explore
     diagnostic / mitigation actions rather than any valid action.
     """
@@ -103,7 +148,7 @@ def format_reward_func(prompts, completions, **kwargs) -> List[float]:
     for completion in completions:
         text = completion[0]["content"]
         action = _extract_action(text)
-        rewards.append(0.3 if action in VALID_ACTIONS else -0.5)
+        rewards.append(0.1 if action in VALID_ACTIONS else -0.4)
     return rewards
 
 
@@ -128,23 +173,7 @@ def step_reward_func(prompts, completions, **kwargs) -> List[float]:
             continue
 
         try:
-            task = "easy"
-            recent_actions: List[str] = []
-            try:
-                state_dict = json.loads(prompt[-1]["content"])
-                task = state_dict.get("task", "easy")
-                if task not in TASK_CONFIGS:   # guard against unknown task names
-                    task = "easy"
-                recent_actions = state_dict.get("recent_actions", [])
-            except Exception:
-                pass
-
-            env = DevOpsEnv(task=task)
-            env.reset()
-            # Replay the recent actions to reconstruct approximate mid-episode state
-            for prev in recent_actions:
-                if prev in VALID_ACTIONS:
-                    env.step(prev)
+            env, _, _ = _replay_env_from_prompt(prompt)
 
             _, step_reward, _, _ = env.step(action)
             # Clamp to [-1, 1] — env already clamps to [-0.25, 1.0] but be explicit
@@ -157,22 +186,29 @@ def step_reward_func(prompts, completions, **kwargs) -> List[float]:
     return rewards
 
 
-# Actions that give trivially safe small rewards — the model's previous local optimum
-_FILLER_ACTIONS = {"acknowledge_incident", "post_status_update"}
+# Only true no-ops count as "filler" — post_status_update is a valid SRE action.
+# Removing it from this set stops the reward functions from punishing
+# legitimate communication steps that the environment actually rewards.
+_FILLER_ACTIONS = {"acknowledge_incident"}
+_NO_VALUE_ACTIONS = {"no_op"}
 
 
 def anti_cheat_reward_func(prompts, completions, **kwargs) -> List[float]:
-    """Reward 3: Penalise reward hacking.
+    """Reward 3: Penalise reward hacking (loop detection + no-op spam).
 
-    BUG FIX (v2): The previous version read from `recent_actions` which the
-    environment caps at the last 5 actions.  More critically, most GRPO
-    training prompts come from *initial* episode states where recent_actions
-    is [], so the repetition penalty (-0.8) never fired during training.
+    v4 — added immediate consecutive-repeat penalty so the model learns
+    *instantly* that doing the same action twice in a row is wrong.
+    Previously this only fired after 3 identical in a row, so the model
+    could do A,A twice and not feel any pain until the 3rd repeat.
 
-    This version reads `actions_taken` (the full episode history injected into
-    mid-episode prompts by generate_prompts), falling back to recent_actions
-    when actions_taken is not present.  The loop-detection branch fires an
-    even stronger penalty when the last 3 actions are all the same token.
+    Priority order (first match wins):
+      1. Loop (last 3 all identical)            → -0.8
+      2. Consecutive repeat (last action == now) → -0.7
+      3. no_op                                  → -0.6
+      4. resolve_incident (usually premature)   → -0.3
+      5. acknowledge spam (2nd+ time)           → -0.6
+      6. Action already done somewhere          → -0.4
+      7. Novel action                           → +0.2
     """
     rewards = []
     for i, completion in enumerate(completions):
@@ -182,45 +218,66 @@ def anti_cheat_reward_func(prompts, completions, **kwargs) -> List[float]:
             rewards.append(-0.5)
             continue
 
-        # Safely get the matching prompt — falls back to [] if prompts is shorter
-        # (this happens in unit tests where prompts=[] is passed intentionally)
         prompt = prompts[i] if i < len(prompts) else []
+        state_dict = _extract_state_from_prompt(prompt)
+        all_actions_taken: List[str] = state_dict.get(
+            "actions_taken", state_dict.get("recent_actions", [])
+        )
+        if not isinstance(all_actions_taken, list):
+            all_actions_taken = []
 
-        all_actions_taken: List[str] = []
-        try:
-            state_dict = json.loads(prompt[-1]["content"])
-            # Prefer full history; fall back to sliding window.
-            all_actions_taken = state_dict.get(
-                "actions_taken", state_dict.get("recent_actions", [])
-            )
-        except Exception:
-            pass
+        last_action = all_actions_taken[-1] if all_actions_taken else None
 
-        if action == "no_op":
-            rewards.append(-0.5)          # strong no-op penalty
-        elif action == "resolve_incident":
-            rewards.append(-0.2)          # premature resolve penalty
-        elif action in _FILLER_ACTIONS:
-            rewards.append(-0.15)         # penalise spamming safe filler actions
-        elif len(all_actions_taken) >= 3 and len(set(all_actions_taken[-3:])) == 1:
-            # Last 3 actions are identical — loop detected, hard break
-            rewards.append(-1.0)
-        elif action in all_actions_taken:
-            # Action already taken somewhere in the episode
+        # 1. Hard loop: last 3 all identical
+        if len(all_actions_taken) >= 3 and len(set(all_actions_taken[-3:])) == 1:
             rewards.append(-0.8)
+        # 2. Consecutive repeat: last action is the same as now
+        elif action == last_action:
+            rewards.append(-0.7)
+        elif action in _NO_VALUE_ACTIONS:
+            rewards.append(-0.6)
+        elif action == "resolve_incident":
+            rewards.append(-0.3)
+        elif action in _FILLER_ACTIONS and all_actions_taken.count(action) >= 1:
+            rewards.append(-0.6)
+        elif action in all_actions_taken:
+            rewards.append(-0.4)
         else:
-            rewards.append(0.4)           # reward any NEW genuine diagnostic/mitigation
+            rewards.append(0.2)
     return rewards
 
 
 def task_alignment_reward_func(prompts, completions, **kwargs) -> List[float]:
-    """Reward 4: Strong bonus for picking the task-correct diagnostic or mitigation.
+    """Reward 4: Bonus for task-correct diagnostics/mitigations; penalty for wrong ones.
 
-    Key fix: reward for required actions raised from 0.3 → 0.8, making the total
-    reward for a correct diagnostic action ~1.4 vs ~-0.35 for a filler action.
-    This gap is large enough for a 1B model to discover via GRPO exploration.
-    Also ensures no reward is given for redundant actions already taken.
+    v4 key change: wrong inspect/rollback/scale actions now receive -0.5
+    (up from -0.15).  This is the root cause of the model defaulting to
+    inspect_auth_logs for every task — the positive novelty signal (+0.2)
+    was larger than the wrong-tool penalty (-0.15), so it never learned
+    to distinguish tasks.  The stronger penalty breaks that equilibrium.
+
+    Action categories and rewards
+    ------------------------------
+    required_diag  (not yet done)  → +0.40
+    required_mit   (not yet done)  → +0.40
+    required_diag/mit (already done)→ -0.25  (discourage duplicate)
+    good_followups (comms/resolve)  → +0.10
+    inspect_* NOT in required_diag  → -0.50  (wrong diagnostic — strong signal)
+    other task-specific actions wrong→-0.35
+    no_op                           → -0.50
     """
+    # All inspect_* action names — used to catch wrong-diagnostic specifically
+    _INSPECT_ACTIONS = {
+        "inspect_auth_logs", "inspect_db_metrics", "inspect_deploy_history",
+        "inspect_network_topology", "inspect_memory_profile", "inspect_disk_usage",
+    }
+    # All task-specific mitigation action names
+    _MIT_ACTIONS = {
+        "rollback_auth_deploy", "rollback_service_deploy", "restart_auth_service",
+        "scale_db_cluster", "flush_cache", "shift_traffic_canary", "withdraw_bgp_route",
+        "archive_old_logs", "reduce_log_verbosity",
+    }
+
     rewards = []
     for prompt, completion in zip(prompts, completions):
         action = _extract_action(completion[0]["content"] or "")
@@ -230,34 +287,42 @@ def task_alignment_reward_func(prompts, completions, **kwargs) -> List[float]:
             continue
 
         task = "easy"
-        recent_actions = []
+        all_actions_taken: List[str] = []
         try:
             state_dict = json.loads(prompt[-1]["content"])
             task = state_dict.get("task", "easy")
-            recent_actions = state_dict.get("recent_actions", [])
+            all_actions_taken = state_dict.get(
+                "actions_taken", state_dict.get("recent_actions", [])
+            )
+            if not isinstance(all_actions_taken, list):
+                all_actions_taken = []
         except Exception:
             pass
 
-        if action in recent_actions and action not in _FILLER_ACTIONS:
-            # Remove any task alignment incentive to farm repeated actions
-            rewards.append(-0.5)
-            continue
-
         config = TASK_CONFIGS.get(task, TASK_CONFIGS["easy"])
-        required_diag = config.get("required_diagnostics", [])
-        required_mit  = config.get("required_mitigations", [])
+        required_diag  = config.get("required_diagnostics", [])
+        required_mit   = config.get("required_mitigations", [])
         good_followups = config.get("good_followups", [])
 
-        if action in required_diag or action in required_mit:
-            rewards.append(0.8)    # massive reward for the right tool on the right task
+        if action in required_diag and action not in all_actions_taken:
+            rewards.append(0.40)   # correct diagnostic, first time
+        elif action in required_mit and action not in all_actions_taken:
+            rewards.append(0.40)   # correct mitigation, first time
+        elif action in required_diag or action in required_mit:
+            rewards.append(-0.25)  # duplicate required action
         elif action in good_followups:
-            rewards.append(0.3)    # good follow-up action
-        elif action in _FILLER_ACTIONS:
-            rewards.append(0.0)    # no alignment credit for filler
-        elif action == "no_op":
-            rewards.append(-0.5)
+            rewards.append(0.10)   # post_status_update, resolve, etc.
+        elif action in _INSPECT_ACTIONS:
+            # Inspect action but NOT the right one for this task — strong penalty
+            # This is the primary signal that breaks the inspect_auth_logs habit
+            rewards.append(-0.50)
+        elif action in _MIT_ACTIONS:
+            # Wrong mitigation for this task
+            rewards.append(-0.35)
+        elif action in _NO_VALUE_ACTIONS:
+            rewards.append(-0.50)
         else:
-            rewards.append(-0.2)   # valid action but wrong task
+            rewards.append(-0.15)
 
     return rewards
 
@@ -278,16 +343,15 @@ def sequence_progress_reward_func(prompts, completions, **kwargs) -> List[float]
             rewards.append(0.0)
             continue
 
-        task = "easy"
-        all_actions_taken: List[str] = []
-        try:
-            state_dict = json.loads(prompt[-1]["content"])
-            task = state_dict.get("task", "easy")
-            all_actions_taken = state_dict.get(
-                "actions_taken", state_dict.get("recent_actions", [])
-            )
-        except Exception:
-            pass
+        state_dict = _extract_state_from_prompt(prompt)
+        task = state_dict.get("task", "easy")
+        if task not in TASK_CONFIGS:
+            task = "easy"
+        all_actions_taken: List[str] = state_dict.get(
+            "actions_taken", state_dict.get("recent_actions", [])
+        )
+        if not isinstance(all_actions_taken, list):
+            all_actions_taken = []
 
         config = TASK_CONFIGS.get(task, TASK_CONFIGS["easy"])
         required_diag = set(config.get("required_diagnostics", []))
@@ -296,17 +360,169 @@ def sequence_progress_reward_func(prompts, completions, **kwargs) -> List[float]
 
         diag_complete = required_diag.issubset(done_so_far)
 
-        if action in required_mit and diag_complete:
-            # Agent is attempting mitigation AFTER completing diagnosis — perfect sequence
-            rewards.append(0.5)
-        elif action in required_diag and not diag_complete:
-            # Agent is still in the diagnostic phase — good
-            rewards.append(0.2)
+        mit_complete = required_mit.issubset(done_so_far)
+        is_resolve = action == "resolve_incident"
+
+        if action in required_diag and not diag_complete:
+            rewards.append(0.25)      # prioritize finishing diagnosis first
+        elif action in required_mit and diag_complete and not mit_complete:
+            rewards.append(0.35)      # mitigation after diagnosis
         elif action in required_mit and not diag_complete:
-            # Attempting mitigation before diagnosis — penalise slightly
-            rewards.append(-0.1)
+            rewards.append(-0.35)     # mitigation too early
+        elif is_resolve and diag_complete and mit_complete:
+            rewards.append(0.60)      # resolve only after required work complete
+        elif is_resolve and not (diag_complete and mit_complete):
+            rewards.append(-0.80)     # strong penalty for premature resolve
         else:
-            rewards.append(0.0)
+            rewards.append(-0.05)
+
+    return rewards
+
+
+def progress_delta_reward_func(prompts, completions, **kwargs) -> List[float]:
+    """Reward 6: Dense reward for measurable task progress.
+
+    Compares completion of required diagnostics/mitigations before vs after
+    applying the candidate action in the replayed environment.
+    """
+    rewards: List[float] = []
+    for prompt, completion in zip(prompts, completions):
+        action = _extract_action(completion[0]["content"] or "")
+        if action not in VALID_ACTIONS:
+            rewards.append(-0.4)
+            continue
+        try:
+            env, _, task = _replay_env_from_prompt(prompt)
+            cfg = TASK_CONFIGS.get(task, TASK_CONFIGS["easy"])
+            req_diag = set(cfg.get("required_diagnostics", []))
+            req_mit = set(cfg.get("required_mitigations", []))
+
+            before = set(env._state.get("actions_taken", []))
+            before_progress = (
+                len(req_diag.intersection(before)) +
+                len(req_mit.intersection(before))
+            )
+
+            env.step(action)
+            after = set(env._state.get("actions_taken", []))
+            after_progress = (
+                len(req_diag.intersection(after)) +
+                len(req_mit.intersection(after))
+            )
+
+            delta = after_progress - before_progress
+            if delta > 0:
+                rewards.append(0.9)
+            elif action in {"acknowledge_incident", "post_status_update"}:
+                rewards.append(-0.6)
+            elif action in before:
+                rewards.append(-0.5)
+            else:
+                rewards.append(-0.1)
+        except Exception:
+            rewards.append(-0.4)
+    return rewards
+
+
+def communication_gate_reward_func(prompts, completions, **kwargs) -> List[float]:
+    """Reward 7: Gate communication actions until technical progress exists."""
+    rewards: List[float] = []
+    for prompt, completion in zip(prompts, completions):
+        action = _extract_action(completion[0]["content"] or "")
+        if action not in VALID_ACTIONS:
+            rewards.append(-0.3)
+            continue
+        try:
+            env, _, task = _replay_env_from_prompt(prompt)
+            cfg = TASK_CONFIGS.get(task, TASK_CONFIGS["easy"])
+            req_diag = set(cfg.get("required_diagnostics", []))
+            req_mit = set(cfg.get("required_mitigations", []))
+            taken = set(env._state.get("actions_taken", []))
+            diag_done = len(req_diag.intersection(taken)) > 0
+            mit_done = len(req_mit.intersection(taken)) > 0
+            tech_progress = diag_done or mit_done
+
+            if action == "acknowledge_incident":
+                # only first acknowledge is acceptable
+                rewards.append(-0.8 if "acknowledge_incident" in taken else 0.05)
+            elif action == "post_status_update":
+                rewards.append(0.15 if tech_progress else -0.8)
+            elif action == "resolve_incident":
+                rewards.append(0.2 if (diag_done and mit_done) else -1.0)
+            else:
+                rewards.append(0.0)
+        except Exception:
+            rewards.append(-0.3)
+    return rewards
+
+
+def terminal_outcome_reward_func(prompts, completions, **kwargs) -> List[float]:
+    """Reward 8: outcome-first terminal objective using real environment rollouts.
+
+    Primary learning signal. Reconstructs episode state from prompt history,
+    simulates the proposed action, and rewards score progress + resolution.
+
+    Primary signal; strongly favors true resolution and penalizes farming.
+    """
+    rewards: List[float] = []
+    for prompt, completion in zip(prompts, completions):
+        action = _extract_action(completion[0]["content"] or "")
+        if action not in VALID_ACTIONS:
+            rewards.append(-0.5)
+            continue
+
+        try:
+            env, _, task = _replay_env_from_prompt(prompt)
+            pre_score, _ = compute_score(task, env._state)
+            _, _, _, info = env.step(action)
+            post_score, _ = compute_score(task, env._state)
+
+            score_delta = float(post_score - pre_score)
+            state = env._state
+            cfg = TASK_CONFIGS.get(task, TASK_CONFIGS["easy"])
+            required_mit = set(cfg.get("required_mitigations", []))
+            done_actions = set(state.get("actions_taken", []))
+            mit_complete = required_mit.issubset(done_actions)
+            stable = state.get("incident_phase") in {"monitoring", "resolved"}
+            resolved = bool(state.get("resolved", False))
+
+            # Core signal: how much did the score move?
+            reward = 3.2 * score_delta
+
+            # Big bonus for genuine resolution
+            if resolved and stable and mit_complete:
+                reward += 3.0
+            elif action == "resolve_incident" and info.get("error") == "incident_not_stable":
+                reward -= 1.5
+            elif action == "resolve_incident" and not (stable and mit_complete):
+                reward -= 1.3
+
+            history = state.get("actions_taken", [])
+
+            # Loop detection — strong but not overwhelming
+            if len(history) >= 4 and len(set(history[-4:])) == 1:
+                reward -= 1.0
+
+            # acknowledge_incident repeat penalty (reduced from before)
+            if action in _FILLER_ACTIONS and len(history) > 2:
+                reward -= 0.8
+            elif action in _FILLER_ACTIONS:
+                reward -= 0.35
+
+            # Mild repeat penalty for duplicating any action
+            if history.count(action) > 1:
+                reward -= 0.6
+
+            # Bonus for first-time required actions (preserves positive variance)
+            required_diag = set(cfg.get("required_diagnostics", []))
+            if action in required_diag and action not in set(history[:-1]):
+                reward += 0.4
+            if action in required_mit and action not in set(history[:-1]):
+                reward += 0.5
+
+            rewards.append(float(max(-2.5, min(3.5, reward))))
+        except Exception:
+            rewards.append(-0.5)
 
     return rewards
 
@@ -365,6 +581,10 @@ class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
         "reward_anti_cheat_reward_func",
         "reward_task_alignment_reward_func",
         "reward_sequence_progress_reward_func",
+        "reward_progress_delta_reward_func",
+        "reward_communication_gate_reward_func",
+        "reward_terminal_outcome_reward_func",
+        "reward_diversity_reward_func",
     ]
 
     def __init__(self, log_path: str = REWARD_LOG_PATH):
@@ -422,7 +642,77 @@ class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
 
 
 # ---------------------------------------------------------------------------
-# 3. Curriculum Dataset Generation
+# 3. Reward Curve Plotter
+# ---------------------------------------------------------------------------
+
+def plot_reward_curve(
+    log_path: str = REWARD_LOG_PATH,
+    out_path: str = "reward_curve.png",
+    smooth_window: int = 10,
+) -> None:
+    """Single-panel reward curve matching the reference style.
+    Shows: raw (faint blue), smoothed bold line, dashed linear trend.
+    No component subplots — one clean chart.
+    """
+    import numpy as np
+    import pandas as pd
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not os.path.exists(log_path):
+        print(f"[plot] Reward log not found: {log_path}")
+        return
+
+    df = pd.read_csv(log_path)
+    for col in df.columns:
+        if col != "step":
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["step", "reward"]).sort_values("step").reset_index(drop=True)
+    steps = df["step"].values
+    raw   = df["reward"].values
+
+    smoothed = pd.Series(raw).rolling(smooth_window, min_periods=1, center=True).mean().values
+
+    mask = ~np.isnan(raw)
+    trend = None
+    if mask.sum() >= 2:
+        sl, ic = np.polyfit(steps[mask], raw[mask], 1)
+        trend = sl * steps + ic
+
+    BASE_BLUE  = "#4C72B0"
+    LIGHT_BLUE = "#A8C4E0"
+
+    fig, ax = plt.subplots(figsize=(12, 5), facecolor="white")
+    fig.suptitle(
+        f"GRPO Training \u2014 DevOps Incident Triage SRE Agent\n"
+        f"{MODEL_ID.split('/')[-1]} + SFT warm-start + GRPO (7 reward signals)",
+        fontsize=11, fontweight="bold",
+    )
+
+    ax.plot(steps, raw,      color=LIGHT_BLUE, alpha=0.35, linewidth=0.8, label="raw")
+    ax.plot(steps, smoothed, color=BASE_BLUE,  linewidth=2.2,
+            label=f"smoothed (w={smooth_window})")
+    if trend is not None:
+        ax.plot(steps, trend, color="#888888", linewidth=1.2,
+                linestyle="--", alpha=0.7, label="trend")
+
+    ax.axhline(0, color="#cccccc", linewidth=0.6, linestyle=":")
+    ax.set_title("Overall Reward", fontsize=10, pad=6)
+    ax.set_xlabel("Training Step", fontsize=9)
+    ax.set_ylabel("Reward", fontsize=9)
+    ax.legend(fontsize=8, loc="upper left", framealpha=0.8)
+    ax.grid(True, alpha=0.3)
+    ax.tick_params(labelsize=8)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] Reward curve saved to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# 4. Curriculum Dataset Generation
 # ---------------------------------------------------------------------------
 
 def _make_prompt(state: dict) -> dict:
@@ -626,25 +916,28 @@ def main():
 
     # ── Phase 2: GRPO RL Training ──────────────────────────────────────────
     print("[3] Phase 2 — Generating GRPO Curriculum (all 6 tasks)...")
-    grpo_dataset = generate_prompts()
+    # Bias GRPO toward non-initial states so the policy learns beyond action #1.
+    grpo_dataset = generate_prompts(
+        per_task_n=GRPO_PER_TASK_PROMPTS,
+        mid_episode_n=GRPO_MID_EPISODE_PROMPTS,
+    )
 
-    print("[4] Setting up GRPO Config (max_steps=60)...")
+    print(f"[4] Setting up GRPO Config (max_steps={GRPO_MAX_STEPS})...")
     training_args = GRPOConfig(
         output_dir="outputs_grpo",
-        learning_rate=5e-6,              # halved from 1e-5 — reduces KL explosion risk
+        learning_rate=1e-5,              # raised from 5e-6 — rewards are now positive so higher LR is safe
         lr_scheduler_type="cosine",
-        warmup_steps=20,                 # NaN fix: let optimizer calibrate before full LR kicks in
-        max_steps=60,
+        warmup_steps=8,                  # shorter warmup keeps T4 runs moving
+        max_steps=GRPO_MAX_STEPS,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=4,
         logging_steps=1,
-        # NaN prevention — the three settings below address the KL spike → NaN chain
-        max_grad_norm=0.1,               # aggressive clip (default=1.0); stops gradient overflow when KL spikes
+        max_grad_norm=0.3,               # less aggressive than before now rewards are balanced
         # GRPO-specific
-        num_generations=8,               # more group samples → reward_std stays non-zero even during partial collapse
+        num_generations=8,
         max_prompt_length=512,
         max_completion_length=32,
-        temperature=0.9,                 # adds generation stochasticity so completions are not all identical
+        temperature=0.9,
     )
 
     trainer = GRPOTrainer(
@@ -656,6 +949,9 @@ def main():
             anti_cheat_reward_func,
             task_alignment_reward_func,
             sequence_progress_reward_func,
+            progress_delta_reward_func,
+            communication_gate_reward_func,
+            terminal_outcome_reward_func,
             diversity_reward_func,       # NEW: breaks GRPO variance collapse
         ],
         args=training_args,
@@ -669,6 +965,13 @@ def main():
     print("[6] Saving merged model...")
     model.save_pretrained_merged("trained_sre_agent", tokenizer, save_method="merged_16bit")
     print(f"Training Complete! Reward log saved to {REWARD_LOG_PATH}")
+
+    print("[7] Generating reward curve plot...")
+    plot_reward_curve(
+        log_path=REWARD_LOG_PATH,
+        out_path="reward_curve.png",
+        smooth_window=10,
+    )
 
 
 if __name__ == "__main__":
