@@ -56,11 +56,16 @@ system_prompt = (
 # ---------------------------------------------------------------------------
 
 def format_reward_func(prompts, completions, **kwargs) -> List[float]:
-    """Reward 1: Did the model output a single valid action string?"""
+    """Reward 1: Did the model output a single valid action string?
+
+    Reduced from 1.0 → 0.3 so this baseline signal no longer dominates
+    the task-specific rewards and the model has a real incentive to explore
+    diagnostic / mitigation actions rather than any valid action.
+    """
     rewards = []
     for completion in completions:
         text = completion[0]["content"].strip()
-        rewards.append(1.0 if text in VALID_ACTIONS else 0.0)
+        rewards.append(0.3 if text in VALID_ACTIONS else -0.5)
     return rewards
 
 
@@ -101,32 +106,45 @@ def step_reward_func(prompts, completions, **kwargs) -> List[float]:
     return rewards
 
 
+# Actions that give trivially safe small rewards — the model's previous local optimum
+_FILLER_ACTIONS = {"acknowledge_incident", "post_status_update"}
+
+
 def anti_cheat_reward_func(prompts, completions, **kwargs) -> List[float]:
-    """Reward 3: Penalise reward hacking (spamming no_op or resolving prematurely)."""
+    """Reward 3: Penalise reward hacking.
+
+    Key fix: the previous version rewarded ALL non-no_op actions equally (+0.1),
+    which let the model spam 'acknowledge_incident' and 'post_status_update' for
+    a consistent safe reward.  Now those filler actions are penalised (-0.15) and
+    genuine diagnostic/mitigation actions are rewarded more strongly (+0.4).
+    """
     rewards = []
     for completion in completions:
         text = completion[0]["content"].strip()
         if text == "no_op":
-            rewards.append(-0.2)
+            rewards.append(-0.5)          # strong no-op penalty
         elif text == "resolve_incident":
-            rewards.append(-0.1)
+            rewards.append(-0.2)          # premature resolve penalty
+        elif text in _FILLER_ACTIONS:
+            rewards.append(-0.15)         # penalise spamming safe filler actions
         else:
-            rewards.append(0.1)
+            rewards.append(0.4)           # reward any real diagnostic/mitigation
     return rewards
 
 
 def task_alignment_reward_func(prompts, completions, **kwargs) -> List[float]:
-    """Reward 4: Did the model pick an action that matches the task's required
-    diagnostics, mitigations, or good follow-ups?
-    This prevents the model from gaming format/anti-cheat rewards with
-    valid-but-wrong-task actions.
+    """Reward 4: Strong bonus for picking the task-correct diagnostic or mitigation.
+
+    Key fix: reward for required actions raised from 0.3 → 0.8, making the total
+    reward for a correct diagnostic action ~1.4 vs ~-0.35 for a filler action.
+    This gap is large enough for a 1B model to discover via GRPO exploration.
     """
     rewards = []
     for prompt, completion in zip(prompts, completions):
         action = completion[0]["content"].strip()
 
         if action not in VALID_ACTIONS:
-            rewards.append(-0.2)
+            rewards.append(-0.3)
             continue
 
         task = "easy"
@@ -138,15 +156,64 @@ def task_alignment_reward_func(prompts, completions, **kwargs) -> List[float]:
 
         config = TASK_CONFIGS.get(task, TASK_CONFIGS["easy"])
         required_diag = config.get("required_diagnostics", [])
-        required_mit = config.get("required_mitigations", [])
+        required_mit  = config.get("required_mitigations", [])
         good_followups = config.get("good_followups", [])
 
         if action in required_diag or action in required_mit:
-            rewards.append(0.3)
+            rewards.append(0.8)    # massive reward for the right tool on the right task
         elif action in good_followups:
-            rewards.append(0.1)
+            rewards.append(0.3)    # good follow-up action
+        elif action in _FILLER_ACTIONS:
+            rewards.append(0.0)    # no alignment credit for filler
         elif action == "no_op":
-            rewards.append(-0.2)
+            rewards.append(-0.5)
+        else:
+            rewards.append(-0.2)   # valid action but wrong task
+
+    return rewards
+
+
+def sequence_progress_reward_func(prompts, completions, **kwargs) -> List[float]:
+    """Reward 5 (NEW): Bonus when the agent has completed required diagnostics
+    before attempting mitigations — reinforces the correct SRE workflow:
+    investigate → mitigate → communicate → resolve.
+
+    Uses the recent_actions list from the serialised observation to check
+    whether prior steps already included the required diagnostics.
+    """
+    rewards = []
+    for prompt, completion in zip(prompts, completions):
+        action = completion[0]["content"].strip()
+
+        if action not in VALID_ACTIONS:
+            rewards.append(0.0)
+            continue
+
+        task = "easy"
+        recent_actions: List[str] = []
+        try:
+            state_dict = json.loads(prompt[-1]["content"])
+            task = state_dict.get("task", "easy")
+            recent_actions = state_dict.get("recent_actions", [])
+        except Exception:
+            pass
+
+        config = TASK_CONFIGS.get(task, TASK_CONFIGS["easy"])
+        required_diag = set(config.get("required_diagnostics", []))
+        required_mit  = set(config.get("required_mitigations", []))
+        done_so_far   = set(recent_actions)
+
+        diag_complete = required_diag.issubset(done_so_far)
+
+        if action in required_mit and diag_complete:
+            # Agent is attempting mitigation AFTER completing diagnosis — perfect sequence
+            rewards.append(0.5)
+        elif action in required_diag and not diag_complete:
+            # Agent is still in the diagnostic phase — good
+            rewards.append(0.2)
+        elif action in required_mit and not diag_complete:
+            # Attempting mitigation before diagnosis — penalise slightly
+            rewards.append(-0.1)
         else:
             rewards.append(0.0)
 
@@ -177,6 +244,7 @@ class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
         "reward_step_reward_func",
         "reward_anti_cheat_reward_func",
         "reward_task_alignment_reward_func",
+        "reward_sequence_progress_reward_func",
     ]
 
     def __init__(self, log_path: str = REWARD_LOG_PATH):
@@ -383,12 +451,12 @@ def main():
     print("[3] Phase 2 — Generating GRPO Curriculum (all 6 tasks)...")
     grpo_dataset = generate_prompts()
 
-    print("[4] Setting up GRPO Config (max_steps=200)...")
+    print("[4] Setting up GRPO Config (max_steps=300)...")
     training_args = GRPOConfig(
         output_dir="outputs_grpo",
         learning_rate=1e-5,
         lr_scheduler_type="cosine",
-        max_steps=200,           # doubled from 100 for a more visible reward curve
+        max_steps=300,           # extra steps so model can discover the diag→mitigate sequence
         per_device_train_batch_size=2,
         gradient_accumulation_steps=4,
         logging_steps=1,
@@ -406,6 +474,7 @@ def main():
             step_reward_func,
             anti_cheat_reward_func,
             task_alignment_reward_func,
+            sequence_progress_reward_func,
         ],
         args=training_args,
         train_dataset=grpo_dataset,
