@@ -236,6 +236,10 @@ class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
     Inherits from transformers.TrainerCallback at class-definition time so the
     module can still be imported on machines without GPU/transformers installed
     (the fallback base class is plain object).
+
+    Only rows where at least one reward key is present are written — this
+    avoids the all-NaN rows that appear when TRL emits non-training log
+    events (e.g. learning-rate warmup, checkpoint events).
     """
 
     REWARD_KEYS = [
@@ -256,8 +260,18 @@ class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
         if logs is None:
             return
 
+        # ── Only log rows that contain at least the overall reward ──────────
+        # TRL emits `reward` (and per-function `reward_*` keys) together on
+        # the same log event.  If `reward` is absent this is a non-training
+        # event (LR schedule, save checkpoint, etc.) — skip it to avoid rows
+        # full of NaN values that pollute the reward curve CSV.
+        if "reward" not in logs:
+            return
+
         row = {"step": state.global_step}
         for key in self.REWARD_KEYS:
+            # Use empty string for missing keys — pandas reads this as NaN
+            # which is correct: the key may not be emitted on every step.
             row[key] = logs.get(key, "")
 
         write_header = not self._header_written and not os.path.exists(self.log_path)
