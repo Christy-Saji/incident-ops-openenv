@@ -10,7 +10,10 @@ pinned: false
 
 # 🚨 DevOps Incident Triage — SRE Agent OpenEnv
 
+**OpenEnv Hackathon 2026 · Theme #3 — World Modeling · Sub-theme #3.1 — Professional Tasks**
+
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-v3.0-6366f1?style=flat-square)](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv)
+[![Theme](https://img.shields.io/badge/Theme-World%20Modeling%20%233.1-a855f7?style=flat-square)](#)
 [![Tasks](https://img.shields.io/badge/tasks-6-22c55e?style=flat-square)](#tasks)
 [![Actions](https://img.shields.io/badge/actions-19-f59e0b?style=flat-square)](#action-space)
 [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/main/colab_training.ipynb)
