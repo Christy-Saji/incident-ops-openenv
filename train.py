@@ -146,8 +146,12 @@ def anti_cheat_reward_func(prompts, completions, **kwargs) -> List[float]:
     even stronger penalty when the last 3 actions are all the same token.
     """
     rewards = []
-    for prompt, completion in zip(prompts, completions):
+    for i, completion in enumerate(completions):
         action = completion[0]["content"].strip()
+
+        # Safely get the matching prompt — falls back to [] if prompts is shorter
+        # (this happens in unit tests where prompts=[] is passed intentionally)
+        prompt = prompts[i] if i < len(prompts) else []
 
         all_actions_taken: List[str] = []
         try:
