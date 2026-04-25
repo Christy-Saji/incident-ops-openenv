@@ -66,7 +66,10 @@ def format_reward_func(prompts, completions, **kwargs) -> List[float]:
 
 def step_reward_func(prompts, completions, **kwargs) -> List[float]:
     """Reward 2: Does this action improve the incident state?
-    Uses task-aware env so medium/hard tasks get their correct starting state.
+
+    Restores approximate mid-episode state by replaying recent_actions from the
+    serialised observation in the user message before scoring the candidate action.
+    This fixes the bug where mid-episode prompts were always evaluated from step 0.
     """
     rewards = []
     for prompt, completion in zip(prompts, completions):
@@ -76,15 +79,22 @@ def step_reward_func(prompts, completions, **kwargs) -> List[float]:
             rewards.append(-0.5)
             continue
 
-        # Parse the task from the serialised observation in the user message
         task = "easy"
+        recent_actions: List[str] = []
         try:
             state_dict = json.loads(prompt[-1]["content"])
             task = state_dict.get("task", "easy")
+            recent_actions = state_dict.get("recent_actions", [])
         except Exception:
             pass
 
         env = DevOpsEnv(task=task)
+        env.reset()
+        # Replay the recent actions to reconstruct approximate mid-episode state
+        for prev in recent_actions:
+            if prev in VALID_ACTIONS:
+                env.step(prev)
+
         _, step_reward, _, _ = env.step(action)
         rewards.append(float(step_reward))
 
@@ -147,11 +157,18 @@ def task_alignment_reward_func(prompts, completions, **kwargs) -> List[float]:
 # 2. Reward Curve Logger Callback
 # ---------------------------------------------------------------------------
 
-class RewardLoggerCallback:
+try:
+    from transformers import TrainerCallback as _TrainerCallbackBase
+except ImportError:  # allow import on CPU-only machines without transformers
+    _TrainerCallbackBase = object  # type: ignore[misc,assignment]
+
+
+class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
     """Saves per-step reward metrics to a CSV for demo reward curves.
 
-    Inherits from transformers.TrainerCallback at runtime (when instantiated
-    inside main()) so this module can be imported without torch/transformers.
+    Inherits from transformers.TrainerCallback at class-definition time so the
+    module can still be imported on machines without GPU/transformers installed
+    (the fallback base class is plain object).
     """
 
     REWARD_KEYS = [
@@ -161,15 +178,6 @@ class RewardLoggerCallback:
         "reward_anti_cheat_reward_func",
         "reward_task_alignment_reward_func",
     ]
-
-    def __new__(cls, log_path: str = REWARD_LOG_PATH):
-        """Dynamically subclass TrainerCallback at instantiation time."""
-        from transformers import TrainerCallback
-        # Build a proper subclass the first time we're instantiated
-        if not issubclass(cls, TrainerCallback):
-            cls.__bases__ = (TrainerCallback,)
-        instance = object.__new__(cls)
-        return instance
 
     def __init__(self, log_path: str = REWARD_LOG_PATH):
         self.log_path = log_path
@@ -247,22 +255,38 @@ def generate_prompts(
     per_task_n: int = 15,
     mid_episode_n: int = 15,
     seed: int = 42,
+    easy_n: int = None,
+    medium_n: int = None,
+    hard_n: int = None,
 ) -> Dataset:
     """Generate a curriculum-mixed prompt dataset for GRPO.
 
     Distribution:
       - per_task_n prompts per task initial state (all 6 tasks)
+        OR easy_n/medium_n/hard_n for per-task control (easy/medium/hard only)
       - mid_episode_n : states captured after 1-2 random valid steps
     """
     random.seed(seed)
     data = []
-    all_tasks = list(TASK_CONFIGS.keys())
+
+    # Support per-task counts (easy_n / medium_n / hard_n) or fall back to per_task_n
+    per_task_counts = {}
+    if easy_n is not None or medium_n is not None or hard_n is not None:
+        per_task_counts = {
+            "easy": easy_n if easy_n is not None else per_task_n,
+            "medium": medium_n if medium_n is not None else per_task_n,
+            "hard": hard_n if hard_n is not None else per_task_n,
+        }
+        all_tasks = list(per_task_counts.keys())
+    else:
+        all_tasks = list(TASK_CONFIGS.keys())
+        per_task_counts = {task: per_task_n for task in all_tasks}
 
     # Initial states for every task
     for task in all_tasks:
         env = DevOpsEnv(task=task)
         state = env.reset()
-        for _ in range(per_task_n):
+        for _ in range(per_task_counts[task]):
             data.append(_make_prompt(state))
 
     # Mid-episode states — vary task and number of warm-up steps
