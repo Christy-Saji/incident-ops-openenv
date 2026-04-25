@@ -16,9 +16,9 @@ pinned: false
 [![Theme](https://img.shields.io/badge/Theme-World%20Modeling%20%233.1-a855f7?style=flat-square)](#)
 [![Tasks](https://img.shields.io/badge/tasks-6-22c55e?style=flat-square)](#tasks)
 [![Actions](https://img.shields.io/badge/actions-19-f59e0b?style=flat-square)](#action-space)
-[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/main/colab_training.ipynb)
+[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](#-training-notebook)
 
-> **Links:** [🤗 Live Space](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv) · [📓 Colab Training Notebook](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/main/colab_training.ipynb) · [📝 HuggingFace Blog Post](#) <!-- TODO: add blog post link -->
+> **Links:** [🤗 Live Space](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv) · [📓 Colab Notebook](#-training-notebook) · [📝 HuggingFace Blog Post](#) <!-- TODO: add blog post link -->
 ---
 
 ## The Theme
@@ -209,6 +209,25 @@ docker run --rm -p 7860:7860 devops-openenv
 | `/leaderboard` | GET | Best scores per task. `?task=` optional |
 | `/tasks` | GET | All task names + descriptions |
 | `/health` | GET | Health check |
+
+---
+
+## 📓 Training Notebook
+
+The full training pipeline (SFT warm-start → 300-step GRPO → before/after comparison) is in **`colab_training.ipynb`**.
+
+> **Open in Colab:** *(shared link — no GitHub login required)*
+> 🔗 **[Open Training Notebook](https://colab.research.google.com/drive/PLACEHOLDER)** ← *(link will be updated before submission)*
+
+**Requirements:** T4 GPU runtime · ~45 min end-to-end
+
+**What the notebook does:**
+1. Installs dependencies + clones repo
+2. Smoke-tests all 6 tasks and 5 reward functions (no GPU needed)
+3. Runs a 5-step sanity train to prove the pipeline works (~2 min)
+4. Runs the full SFT warm-start + 300-step GRPO training (~40 min)
+5. Plots the reward curve and saves `reward_curve.png`
+6. Runs base model vs trained model comparison across all 6 tasks
 
 ---
 

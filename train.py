@@ -233,16 +233,19 @@ except ImportError:  # allow import on CPU-only machines without transformers
 class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
     """Saves per-step reward metrics to a CSV for demo reward curves.
 
-    Inherits from transformers.TrainerCallback at class-definition time so the
-    module can still be imported on machines without GPU/transformers installed
-    (the fallback base class is plain object).
+    Handles both TRL naming conventions for per-function reward keys:
+      - Old TRL (< ~0.15):  reward_format_reward_func   (underscore prefix)
+      - New TRL (>= ~0.15): rewards/format_reward_func  (slash prefix)
 
-    Only rows where at least one reward key is present are written — this
-    avoids the all-NaN rows that appear when TRL emits non-training log
-    events (e.g. learning-rate warmup, checkpoint events).
+    All keys are normalised to the underscore form before writing so the
+    CSV column names are stable regardless of which TRL version is installed.
+    Only rows where 'reward' is present are written — non-training log
+    events (LR warmup, checkpoint saves) are skipped.
     """
 
-    REWARD_KEYS = [
+    # Canonical CSV column names.
+    CSV_COLUMNS = [
+        "step",
         "reward",
         "reward_format_reward_func",
         "reward_step_reward_func",
@@ -256,27 +259,37 @@ class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
         self._header_written = False
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
 
+    @staticmethod
+    def _normalize(key: str) -> str:
+        """Convert TRL's slash-format to underscore-format.
+
+        rewards/format_reward_func  ->  reward_format_reward_func
+        reward_format_reward_func   ->  reward_format_reward_func (unchanged)
+        """
+        if key.startswith("rewards/"):
+            return "reward_" + key[len("rewards/"):]
+        return key
+
     def on_log(self, args, state, control, logs=None, **kwargs):
-        if logs is None:
+        if logs is None or "reward" not in logs:
             return
 
-        # ── Only log rows that contain at least the overall reward ──────────
-        # TRL emits `reward` (and per-function `reward_*` keys) together on
-        # the same log event.  If `reward` is absent this is a non-training
-        # event (LR schedule, save checkpoint, etc.) — skip it to avoid rows
-        # full of NaN values that pollute the reward curve CSV.
-        if "reward" not in logs:
-            return
+        # Capture every reward-related key TRL emits and normalize it.
+        row: dict = {"step": state.global_step}
+        for raw_key, value in logs.items():
+            if raw_key == "reward" or raw_key.startswith("reward_") or raw_key.startswith("rewards/"):
+                col = self._normalize(raw_key)
+                row[col] = value
 
-        row = {"step": state.global_step}
-        for key in self.REWARD_KEYS:
-            # Use empty string for missing keys — pandas reads this as NaN
-            # which is correct: the key may not be emitted on every step.
-            row[key] = logs.get(key, "")
+        # Fill any canonical column that TRL didn't emit this step.
+        for col in self.CSV_COLUMNS:
+            row.setdefault(col, "")
 
         write_header = not self._header_written and not os.path.exists(self.log_path)
         with open(self.log_path, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            writer = csv.DictWriter(
+                f, fieldnames=self.CSV_COLUMNS, extrasaction="ignore"
+            )
             if write_header:
                 writer.writeheader()
                 self._header_written = True
