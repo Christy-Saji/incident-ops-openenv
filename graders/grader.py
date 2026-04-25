@@ -128,7 +128,7 @@ def compute_breakdown(task_name: str, state: Dict) -> Dict[str, float]:
         "recovery": round(recovery, 4),
         "communication": round(communication, 4),
         "efficiency": round(efficiency, 4),
-        "harm_penalty": round(harm_penalty, 4),
+        "_harm_penalty": round(harm_penalty, 4),
     }
 
 
@@ -136,8 +136,11 @@ def compute_score(task_name: str, state: Dict) -> Tuple[float, Dict[str, float]]
     breakdown = compute_breakdown(task_name, state)
     weights = TASK_WEIGHTS.get(task_name, TASK_WEIGHTS["hard"])
 
-    score = sum(breakdown[key] * weights.get(key, 0) for key in breakdown if key != "harm_penalty")
-    score -= breakdown["harm_penalty"]
+    # Extract internal penalty key before computing public breakdown
+    harm_penalty = breakdown.pop("_harm_penalty", 0.0)
+
+    score = sum(breakdown[key] * weights.get(key, 0) for key in breakdown)
+    score -= harm_penalty
     score -= min(0.15, state.get("harmful_action_count", 0) * 0.03)
     score = max(0.0, min(1.0, score))
 
