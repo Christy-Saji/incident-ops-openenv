@@ -100,9 +100,12 @@ def health() -> dict:
     return {"status": "healthy", "active_sessions": len(sessions), "version": "3.0"}
 
 
+CORE_TASKS = {"easy", "medium", "hard"}
+
+
 @app.get("/tasks")
 def list_tasks() -> dict:
-    """List all available task scenarios."""
+    """List the three core task scenarios (easy / medium / hard)."""
     return {
         "tasks": [
             {
@@ -113,6 +116,7 @@ def list_tasks() -> dict:
                 "expected_steps": len(cfg.get("optimal_actions", [])),
             }
             for name, cfg in TASK_CONFIGS.items()
+            if name in CORE_TASKS
         ]
     }
 
