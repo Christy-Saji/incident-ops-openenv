@@ -1,7 +1,8 @@
 """Environment implementation for realistic DevOps incident triage."""
 
-from typing import Dict, List, Tuple
 import copy
+import random
+from typing import Dict, List, Tuple
 
 from env.models import Action, Observation, VALID_ACTIONS
 from graders.grader import compute_score
@@ -14,11 +15,13 @@ class DevOpsEnv:
         task: str = "easy",
         max_steps: int | None = None,
         partial_obs: bool = False,
+        stochastic: bool = False,
     ):
         self.task = task
         self.max_steps = max_steps or TASK_CONFIGS[task]["max_steps"]
         self.current_step = 0
         self.partial_obs = partial_obs
+        self.stochastic = stochastic
         self._state: Dict = {}
         self._last_action: str = ""
         self._episode_history: List[Dict] = []
@@ -224,17 +227,20 @@ class DevOpsEnv:
             return
 
         if action == "inspect_network_topology":
-            for hint in config.get("log_hints", []):
+            hints = config.get("network_hints", config.get("log_hints", []))
+            for hint in hints:
                 self._append_unique(self._state["known_findings"], hint)
             return
 
         if action == "inspect_memory_profile":
-            for hint in config.get("log_hints", []):
+            hints = config.get("memory_hints", config.get("log_hints", []))
+            for hint in hints:
                 self._append_unique(self._state["known_findings"], hint)
             return
 
         if action == "inspect_disk_usage":
-            for hint in config.get("log_hints", []):
+            hints = config.get("disk_hints", config.get("log_hints", []))
+            for hint in hints:
                 self._append_unique(self._state["known_findings"], hint)
             return
 
@@ -468,6 +474,9 @@ class DevOpsEnv:
             self._state["incident_phase"] = "monitoring"
             self._state["active_alerts"] = ["incident mitigated, monitoring recovery"]
 
+        # Apply stochastic noise after all deterministic dynamics are resolved
+        self._apply_noise()
+
     def _is_stable(self) -> bool:
         metrics = self._state["metrics"]
         status = self._state["service_status"]
@@ -484,6 +493,23 @@ class DevOpsEnv:
         required = set(TASK_CONFIGS[self.task]["good_followups"]) - {"resolve_incident"}
         completed = set(self._state["actions_taken"])
         return self._is_stable() and required.issubset(completed)
+
+    def _apply_noise(self) -> None:
+        """Add ±5 % uniform jitter to key metrics when stochastic=True.
+
+        This prevents the model from memorising fixed action sequences and
+        forces it to read the actual observation on every step.
+        Noise is applied *after* deterministic background dynamics so that
+        the thresholds in _is_stable() are not affected.
+        """
+        if not self.stochastic:
+            return
+        metrics = self._state["metrics"]
+        for key in ("cpu_usage", "memory_usage", "error_rate"):
+            jitter = random.uniform(-0.05, 0.05)
+            metrics[key] = max(0, min(100, round(metrics[key] * (1 + jitter))))
+        jitter = random.uniform(-0.05, 0.05)
+        metrics["latency_ms"] = max(50, round(metrics["latency_ms"] * (1 + jitter)))
 
     @staticmethod
     def _append_unique(items: list[str], value: str) -> None:
