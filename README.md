@@ -19,7 +19,12 @@ pinned: false
 [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/main/colab_training.ipynb)
 
 > **Links:** [🤗 Live Space](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv) · [📓 Colab Training Notebook](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/main/colab_training.ipynb) · [📝 HuggingFace Blog Post](#) <!-- TODO: add blog post link -->
+---
 
+## The Theme
+
+ Theme #3 — World Modeling · Sub-theme #3.1 — Professional Tasks
+ 
 ---
 
 ## The Problem
