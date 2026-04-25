@@ -39,9 +39,18 @@ from tasks.task_config import TASK_CONFIGS
 # ---------------------------------------------------------------------------
 # Hackathon parameters
 # ---------------------------------------------------------------------------
-MODEL_ID = "unsloth/Llama-3.2-1B-Instruct"
+# ⚠️  IMPORTANT: whatever MODEL_ID you set here MUST be the same model you
+# pass as --base-model in compare_inference.py.  Comparing a trained 1B
+# against a base 3B is an unfair comparison — the 3B will always win on
+# raw capability regardless of training quality.
+#
+# Recommended:  "unsloth/Llama-3.2-1B-Instruct"  (T4, ~30 min training)
+#               "unsloth/Llama-3.2-3B-Instruct"  (T4, ~70 min training)
+#               "unsloth/Meta-Llama-3.1-8B-Instruct"  (A100 / HF Endpoint)
+# ---------------------------------------------------------------------------
+MODEL_ID = "unsloth/Llama-3.2-1B-Instruct"   # change both here AND in compare_inference.py
 MAX_SEQ_LENGTH = 1024
-LORA_RANK = 16
+LORA_RANK = 32    # bumped from 16 → 32 for better expressivity at 1B scale
 REWARD_LOG_PATH = "outputs_grpo/reward_log.csv"
 
 system_prompt = (
@@ -113,22 +122,44 @@ _FILLER_ACTIONS = {"acknowledge_incident", "post_status_update"}
 def anti_cheat_reward_func(prompts, completions, **kwargs) -> List[float]:
     """Reward 3: Penalise reward hacking.
 
-    Key fix: the previous version rewarded ALL non-no_op actions equally (+0.1),
-    which let the model spam 'acknowledge_incident' and 'post_status_update' for
-    a consistent safe reward.  Now those filler actions are penalised (-0.15) and
-    genuine diagnostic/mitigation actions are rewarded more strongly (+0.4).
+    BUG FIX (v2): The previous version read from `recent_actions` which the
+    environment caps at the last 5 actions.  More critically, most GRPO
+    training prompts come from *initial* episode states where recent_actions
+    is [], so the repetition penalty (-0.8) never fired during training.
+
+    This version reads `actions_taken` (the full episode history injected into
+    mid-episode prompts by generate_prompts), falling back to recent_actions
+    when actions_taken is not present.  The loop-detection branch fires an
+    even stronger penalty when the last 3 actions are all the same token.
     """
     rewards = []
-    for completion in completions:
-        text = completion[0]["content"].strip()
-        if text == "no_op":
+    for prompt, completion in zip(prompts, completions):
+        action = completion[0]["content"].strip()
+
+        all_actions_taken: List[str] = []
+        try:
+            state_dict = json.loads(prompt[-1]["content"])
+            # Prefer full history; fall back to sliding window.
+            all_actions_taken = state_dict.get(
+                "actions_taken", state_dict.get("recent_actions", [])
+            )
+        except Exception:
+            pass
+
+        if action == "no_op":
             rewards.append(-0.5)          # strong no-op penalty
-        elif text == "resolve_incident":
+        elif action == "resolve_incident":
             rewards.append(-0.2)          # premature resolve penalty
-        elif text in _FILLER_ACTIONS:
+        elif action in _FILLER_ACTIONS:
             rewards.append(-0.15)         # penalise spamming safe filler actions
+        elif len(all_actions_taken) >= 3 and len(set(all_actions_taken[-3:])) == 1:
+            # Last 3 actions are identical — loop detected, hard break
+            rewards.append(-1.0)
+        elif action in all_actions_taken:
+            # Action already taken somewhere in the episode
+            rewards.append(-0.8)
         else:
-            rewards.append(0.4)           # reward any real diagnostic/mitigation
+            rewards.append(0.4)           # reward any NEW genuine diagnostic/mitigation
     return rewards
 
 
@@ -138,6 +169,7 @@ def task_alignment_reward_func(prompts, completions, **kwargs) -> List[float]:
     Key fix: reward for required actions raised from 0.3 → 0.8, making the total
     reward for a correct diagnostic action ~1.4 vs ~-0.35 for a filler action.
     This gap is large enough for a 1B model to discover via GRPO exploration.
+    Also ensures no reward is given for redundant actions already taken.
     """
     rewards = []
     for prompt, completion in zip(prompts, completions):
@@ -148,11 +180,18 @@ def task_alignment_reward_func(prompts, completions, **kwargs) -> List[float]:
             continue
 
         task = "easy"
+        recent_actions = []
         try:
             state_dict = json.loads(prompt[-1]["content"])
             task = state_dict.get("task", "easy")
+            recent_actions = state_dict.get("recent_actions", [])
         except Exception:
             pass
+
+        if action in recent_actions and action not in _FILLER_ACTIONS:
+            # Remove any task alignment incentive to farm repeated actions
+            rewards.append(-0.5)
+            continue
 
         config = TASK_CONFIGS.get(task, TASK_CONFIGS["easy"])
         required_diag = config.get("required_diagnostics", [])
@@ -174,12 +213,12 @@ def task_alignment_reward_func(prompts, completions, **kwargs) -> List[float]:
 
 
 def sequence_progress_reward_func(prompts, completions, **kwargs) -> List[float]:
-    """Reward 5 (NEW): Bonus when the agent has completed required diagnostics
+    """Reward 5: Bonus when the agent has completed required diagnostics
     before attempting mitigations — reinforces the correct SRE workflow:
     investigate → mitigate → communicate → resolve.
 
-    Uses the recent_actions list from the serialised observation to check
-    whether prior steps already included the required diagnostics.
+    BUG FIX (v2): Now reads `actions_taken` (full history) in addition to
+    `recent_actions` so that mid-episode prompts carry complete context.
     """
     rewards = []
     for prompt, completion in zip(prompts, completions):
@@ -190,18 +229,20 @@ def sequence_progress_reward_func(prompts, completions, **kwargs) -> List[float]
             continue
 
         task = "easy"
-        recent_actions: List[str] = []
+        all_actions_taken: List[str] = []
         try:
             state_dict = json.loads(prompt[-1]["content"])
             task = state_dict.get("task", "easy")
-            recent_actions = state_dict.get("recent_actions", [])
+            all_actions_taken = state_dict.get(
+                "actions_taken", state_dict.get("recent_actions", [])
+            )
         except Exception:
             pass
 
         config = TASK_CONFIGS.get(task, TASK_CONFIGS["easy"])
         required_diag = set(config.get("required_diagnostics", []))
         required_mit  = set(config.get("required_mitigations", []))
-        done_so_far   = set(recent_actions)
+        done_so_far   = set(all_actions_taken)
 
         diag_complete = required_diag.issubset(done_so_far)
 
@@ -218,6 +259,28 @@ def sequence_progress_reward_func(prompts, completions, **kwargs) -> List[float]
             rewards.append(0.0)
 
     return rewards
+
+
+def diversity_reward_func(prompts, completions, **kwargs) -> List[float]:
+    """Reward 6 (NEW): Penalise GRPO group-level mode collapse.
+
+    GRPO samples `num_generations` completions per prompt and learns from
+    relative advantage.  When all completions are identical the reward_std
+    is 0 and there is NO gradient signal — the model stops learning entirely.
+
+    This function detects that collapse at the batch level and applies a
+    uniform negative signal so the KL term pushes the policy back toward
+    exploration.  It returns 0.0 when the group shows healthy diversity.
+    """
+    actions = [c[0]["content"].strip() for c in completions]
+    valid_actions = [a for a in actions if a in VALID_ACTIONS]
+    unique_count = len(set(valid_actions)) if valid_actions else 0
+
+    if unique_count <= 1:
+        # Complete collapse — penalise uniformly to force exploration
+        return [-0.25] * len(completions)
+    else:
+        return [0.0] * len(completions)
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +409,25 @@ def generate_sft_dataset(seed: int = 42) -> Dataset:
     return Dataset.from_list(data)
 
 
+def _make_prompt_with_history(state: dict, actions_taken: List[str]) -> dict:
+    """Like _make_prompt but injects the full actions_taken list so that
+    anti_cheat_reward_func and sequence_progress_reward_func can correctly
+    penalise repeated actions in mid-episode prompts.
+
+    BUG FIX: Previously mid-episode prompts only carried `recent_actions`
+    (the last-5 sliding window), so the anti-cheat penalty never fired for
+    actions taken more than 5 steps ago, and the repetition check was always
+    empty for initial-state prompts.
+    """
+    state_with_history = {**state, "actions_taken": actions_taken}
+    return {
+        "prompt": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": json.dumps(state_with_history)},
+        ]
+    }
+
+
 def generate_prompts(
     per_task_n: int = 15,
     mid_episode_n: int = 15,
@@ -360,6 +442,11 @@ def generate_prompts(
       - per_task_n prompts per task initial state (all 6 tasks)
         OR easy_n/medium_n/hard_n for per-task control (easy/medium/hard only)
       - mid_episode_n : states captured after 1-2 random valid steps
+
+    BUG FIX: Mid-episode prompts now include `actions_taken` (the full episode
+    history) via _make_prompt_with_history so that reward functions can penalise
+    repeated actions correctly.  Initial-state prompts have an empty
+    actions_taken by definition and are unchanged.
     """
     random.seed(seed)
     data = []
@@ -377,14 +464,14 @@ def generate_prompts(
         all_tasks = list(TASK_CONFIGS.keys())
         per_task_counts = {task: per_task_n for task in all_tasks}
 
-    # Initial states for every task
+    # Initial states — actions_taken is empty at episode start, so no history needed
     for task in all_tasks:
         env = DevOpsEnv(task=task)
         state = env.reset()
         for _ in range(per_task_counts[task]):
             data.append(_make_prompt(state))
 
-    # Mid-episode states — vary task and number of warm-up steps
+    # Mid-episode states — inject full action history for correct anti-cheat scoring
     for _ in range(mid_episode_n):
         task = random.choice(all_tasks)
         n_warm = random.randint(1, 3)
@@ -396,7 +483,8 @@ def generate_prompts(
             if done:
                 state = env.reset()
                 break
-        data.append(_make_prompt(state))
+        # Pass the full actions_taken so reward functions see real episode history
+        data.append(_make_prompt_with_history(state, env._state["actions_taken"]))
 
     random.shuffle(data)
     print(f"  GRPO dataset: {len(data)} prompts across {len(all_tasks)} tasks + mid-episode states.")
@@ -481,16 +569,19 @@ def main():
     print("[4] Setting up GRPO Config (max_steps=300)...")
     training_args = GRPOConfig(
         output_dir="outputs_grpo",
-        learning_rate=1e-5,
+        learning_rate=5e-6,              # halved from 1e-5 — reduces KL explosion risk
         lr_scheduler_type="cosine",
-        max_steps=300,           # extra steps so model can discover the diag→mitigate sequence
+        max_steps=300,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=4,
         logging_steps=1,
+        # NaN prevention — the three settings below address the KL spike → NaN chain
+        max_grad_norm=0.1,               # aggressive clip (default=1.0); stops gradient overflow when KL spikes
         # GRPO-specific
-        num_generations=4,
+        num_generations=8,               # more group samples → reward_std stays non-zero even during partial collapse
         max_prompt_length=512,
         max_completion_length=32,
+        temperature=0.9,                 # adds generation stochasticity so completions are not all identical
     )
 
     trainer = GRPOTrainer(
@@ -502,6 +593,7 @@ def main():
             anti_cheat_reward_func,
             task_alignment_reward_func,
             sequence_progress_reward_func,
+            diversity_reward_func,       # NEW: breaks GRPO variance collapse
         ],
         args=training_args,
         train_dataset=grpo_dataset,

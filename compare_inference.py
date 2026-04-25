@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from typing import Optional
 
 from env.environment import DevOpsEnv
@@ -52,6 +53,49 @@ def _load_model(model_path: str):
     return model, tokenizer
 
 
+def _generate_action_hf_api(model_id: str, hf_token: str, state: dict) -> str:
+    """Call the HuggingFace Serverless Inference API instead of loading locally.
+
+    Uses the text-generation task endpoint.  No GPU required — HF credits
+    are deducted from your account automatically.
+
+    Requires:  pip install huggingface_hub
+    """
+    try:
+        from huggingface_hub import InferenceClient
+    except ImportError:
+        print("ERROR: huggingface_hub not installed. Run: pip install huggingface_hub")
+        sys.exit(1)
+
+    client = InferenceClient(model=model_id, token=hf_token)
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(state)},
+    ]
+
+    # Retry up to 3 times for transient API errors
+    for attempt in range(3):
+        try:
+            response = client.chat_completion(
+                messages=messages,
+                max_tokens=32,
+                temperature=0.01,   # near-greedy; API does not always support temp=0
+            )
+            raw = response.choices[0].message.content.strip().lower()
+            break
+        except Exception as e:
+            if attempt == 2:
+                print(f"  HF API error after 3 attempts: {e}")
+                return "no_op"
+            time.sleep(2 ** attempt)   # exponential back-off
+
+    for action in VALID_ACTIONS:
+        if action in raw:
+            return action
+    return "no_op"
+
+
 def _generate_action(model, tokenizer, state: dict) -> str:
     """Run one greedy forward pass and extract an action."""
     import torch
@@ -72,7 +116,7 @@ def _generate_action(model, tokenizer, state: dict) -> str:
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=16,
+            max_new_tokens=32,   # match training max_completion_length=32
             do_sample=False,
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
@@ -90,15 +134,24 @@ def _generate_action(model, tokenizer, state: dict) -> str:
     return "no_op"  # fallback if nothing matched
 
 
-def run_episode(model, tokenizer, task: str, label: str) -> tuple[float, bool, list]:
-    """Run a full episode with the model. Returns (score, resolved, actions_taken)."""
+def run_episode(
+    model_or_id,
+    tokenizer_or_token,
+    task: str,
+    label: str,
+    use_hf_api: bool = False,
+) -> tuple[float, bool, list]:
+    """Run a full episode. Works in both local-GPU mode and HF API mode."""
     env = DevOpsEnv(task=task)
     state = env.reset()
     actions_log = []
 
     print(f"\n  [{label}] task={task}")
     for step_num in range(1, env.max_steps + 1):
-        action = _generate_action(model, tokenizer, state)
+        if use_hf_api:
+            action = _generate_action_hf_api(model_or_id, tokenizer_or_token, state)
+        else:
+            action = _generate_action(model_or_id, tokenizer_or_token, state)
         state, reward, done, info = env.step(action)
         actions_log.append(action)
         print(f"    step={step_num:2d}  action={action:<28s}  reward={reward:+.2f}")
@@ -119,17 +172,31 @@ def main():
     parser = argparse.ArgumentParser(description="Compare base vs trained SRE agent")
     parser.add_argument(
         "--base-model",
+        # ⚠️ Keep this in sync with MODEL_ID in train.py for a fair comparison!
         default="unsloth/Llama-3.2-1B-Instruct",
         help="HF model ID or local path for the base (untrained) model",
     )
     parser.add_argument(
         "--trained-model",
         default="./trained_sre_agent",
-        help="Local path to the merged trained model",
+        help="Local path to the merged trained model, OR a HF repo ID if --use-hf-api",
+    )
+    parser.add_argument(
+        "--use-hf-api",
+        action="store_true",
+        help="Use HuggingFace Serverless Inference API instead of loading models locally. "
+             "Requires --hf-token and --trained-model to be a HF repo ID (e.g. yourname/sre-agent).",
+    )
+    parser.add_argument(
+        "--hf-token",
+        default=os.environ.get("HF_TOKEN", ""),
+        help="HuggingFace API token (or set HF_TOKEN env var). Required for --use-hf-api.",
     )
     args = parser.parse_args()
 
-    results: dict[str, dict] = {task: {} for task in TASKS}
+    if args.use_hf_api and not args.hf_token:
+        print("ERROR: --use-hf-api requires --hf-token or the HF_TOKEN environment variable.")
+        sys.exit(1)
 
     # -----------------------------------------------------------------------
     # Run base model
@@ -137,38 +204,58 @@ def main():
     print("\n" + "=" * 60)
     print("PHASE 1: Base Model (no RL training)")
     print("=" * 60)
-    base_model, base_tokenizer = _load_model(args.base_model)
 
-    for task in TASKS:
-        score, resolved, actions = run_episode(base_model, base_tokenizer, task, "BASE")
-        results[task]["base_score"] = score
-        results[task]["base_resolved"] = resolved
-        results[task]["base_actions"] = actions
-
-    del base_model, base_tokenizer  # free VRAM before loading next model
+    if args.use_hf_api:
+        print(f"  [HF API mode] Base model: {args.base_model}")
+        for task in TASKS:
+            score, resolved, actions = run_episode(
+                args.base_model, args.hf_token, task, "BASE", use_hf_api=True
+            )
+            results[task]["base_score"] = score
+            results[task]["base_resolved"] = resolved
+            results[task]["base_actions"] = actions
+    else:
+        base_model, base_tokenizer = _load_model(args.base_model)
+        for task in TASKS:
+            score, resolved, actions = run_episode(base_model, base_tokenizer, task, "BASE")
+            results[task]["base_score"] = score
+            results[task]["base_resolved"] = resolved
+            results[task]["base_actions"] = actions
+        del base_model, base_tokenizer  # free VRAM before loading next model
 
     # -----------------------------------------------------------------------
     # Run trained model
     # -----------------------------------------------------------------------
-    trained_available = os.path.exists(args.trained_model)
-    if not trained_available:
-        print(f"\nWARNING: Trained model not found at '{args.trained_model}'. "
-              "Skipping trained model run. Train first with: python train.py")
-    else:
+    if args.use_hf_api:
         print("\n" + "=" * 60)
-        print("PHASE 2: Trained Model (after GRPO RL)")
+        print("PHASE 2: Trained Model (after GRPO RL) — via HF API")
         print("=" * 60)
-        trained_model, trained_tokenizer = _load_model(args.trained_model)
-
+        print(f"  [HF API mode] Trained model: {args.trained_model}")
         for task in TASKS:
             score, resolved, actions = run_episode(
-                trained_model, trained_tokenizer, task, "TRAINED"
+                args.trained_model, args.hf_token, task, "TRAINED", use_hf_api=True
             )
             results[task]["trained_score"] = score
             results[task]["trained_resolved"] = resolved
             results[task]["trained_actions"] = actions
-
-        del trained_model, trained_tokenizer
+    else:
+        trained_available = os.path.exists(args.trained_model)
+        if not trained_available:
+            print(f"\nWARNING: Trained model not found at '{args.trained_model}'. "
+                  "Skipping trained model run. Train first with: python train.py")
+        else:
+            print("\n" + "=" * 60)
+            print("PHASE 2: Trained Model (after GRPO RL)")
+            print("=" * 60)
+            trained_model, trained_tokenizer = _load_model(args.trained_model)
+            for task in TASKS:
+                score, resolved, actions = run_episode(
+                    trained_model, trained_tokenizer, task, "TRAINED"
+                )
+                results[task]["trained_score"] = score
+                results[task]["trained_resolved"] = resolved
+                results[task]["trained_actions"] = actions
+            del trained_model, trained_tokenizer
 
     # -----------------------------------------------------------------------
     # Print comparison table
@@ -206,7 +293,7 @@ def main():
 
     print("=" * 70)
 
-    if trained_available:
+    if "trained_score" in list(results.values())[0] or args.use_hf_api:
         improvements = [
             results[t]["trained_score"] - results[t]["base_score"]
             for t in TASKS
