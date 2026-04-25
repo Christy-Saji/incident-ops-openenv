@@ -42,15 +42,18 @@ BASELINE_PLANS = {
         "inspect_db_metrics",
         "scale_db_cluster",
         "shift_traffic_canary",
+        "post_status_update",
         "resolve_incident",
     ],
     "hard": [
         "acknowledge_incident",
         "inspect_auth_logs",
         "inspect_deploy_history",
+        "inspect_db_metrics",
         "rollback_auth_deploy",
         "scale_db_cluster",
         "shift_traffic_canary",
+        "post_status_update",
         "resolve_incident",
     ],
 }

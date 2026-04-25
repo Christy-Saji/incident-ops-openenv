@@ -49,11 +49,18 @@
   .metric-value.warn{color:var(--yellow)}
   .metric-value.crit{color:var(--red)}
 
-  /* ── phase pill ── */
-  .phase{padding:3px 12px;border-radius:999px;font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em}
-  .phase.investigating{background:#451a03;color:#fed7aa}
-  .phase.monitoring{background:#1c1917;color:#f59e0b}
-  .phase.resolved{background:#052e16;color:#86efac}
+  /* ── status banner ── */
+  #status-banner{display:none;padding:10px 24px;font-size:.85rem;font-weight:600;text-align:center;letter-spacing:.04em}
+  #status-banner.resolved{background:#052e16;color:#86efac;border-bottom:1px solid #166534}
+  #status-banner.ended{background:#1c1917;color:#f59e0b;border-bottom:1px solid #92400e}
+
+  /* ── leaderboard modal ── */
+  #lb-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:900;align-items:center;justify-content:center}
+  #lb-overlay.open{display:flex}
+  #lb-modal{background:#161b27;border:1px solid #2a3347;border-radius:14px;padding:28px;width:560px;max-height:80vh;overflow-y:auto;position:relative}
+  #lb-modal h3{margin-bottom:14px;font-size:1.05rem;color:#a5b4fc}
+  #lb-close{position:absolute;top:14px;right:18px;background:none;border:none;color:#64748b;font-size:1.2rem;cursor:pointer;width:auto;padding:0}
+  #lb-close:hover{color:#e2e8f0}
 
   /* ── content area ── */
   .content{flex:1;overflow-y:auto;padding:20px 24px;display:flex;flex-direction:column;gap:16px}
@@ -169,9 +176,11 @@
 
   <!-- ── Main ── -->
   <div class="main">
+    <!-- Status banner (shown on resolve / timeout) -->
+    <div id="status-banner"></div>
+
     <!-- Metrics bar -->
     <div class="metrics-bar" id="metrics-bar">
-      <div class="metric"><span class="metric-label">Phase</span><span class="metric-value" id="m-phase">—</span></div>
       <div class="metric"><span class="metric-label">Latency</span><span class="metric-value" id="m-latency">—</span></div>
       <div class="metric"><span class="metric-label">Error Rate</span><span class="metric-value" id="m-error">—</span></div>
       <div class="metric"><span class="metric-label">CPU</span><span class="metric-value" id="m-cpu">—</span></div>
@@ -218,12 +227,26 @@
 
 <div id="toast"></div>
 
+<!-- Leaderboard modal -->
+<div id="lb-overlay" onclick="closeLB(event)">
+  <div id="lb-modal">
+    <button id="lb-close" onclick="closeLB()">✕</button>
+    <h3>🏆 Leaderboard</h3>
+    <div id="lb-content"><p style="color:#64748b;font-size:.85rem">Loading…</p></div>
+  </div>
+</div>
+
 <script>
 const BASE = '';
 let sessionId = null;
 let done = false;
 let optimalActions = [];
 let stepCount = 0;
+let currentMaxSteps = 12;
+
+const TASK_MAX_STEPS = {
+  easy: 8, medium: 10, hard: 12, network: 10, memory_leak: 11, disk_full: 9
+};
 
 const TASK_OPTIMAL = {
   easy: ['acknowledge_incident','inspect_deploy_history','rollback_auth_deploy','resolve_incident'],
@@ -255,9 +278,11 @@ async function resetEnv() {
   const partial = document.getElementById('partial-obs').checked;
   sessionId = 'ui_' + Math.random().toString(36).slice(2,8);
   optimalActions = TASK_OPTIMAL[task] || [];
+  currentMaxSteps = TASK_MAX_STEPS[task] || 12;
   stepCount = 0;
   done = false;
 
+  hideBanner();
   document.getElementById('step-log').innerHTML = '<div class="empty-state">No steps yet</div>';
   document.getElementById('score-val').textContent = '—';
   document.getElementById('breakdown-panel').innerHTML = '';
@@ -282,9 +307,13 @@ async function takeAction(action) {
     if (res.done) {
       done = true;
       disableActions();
-      const msg = res.observation.incident_phase === 'resolved'
-        ? '✅ Incident resolved!' : '⏱ Episode ended (max steps reached)';
-      toast(msg, res.observation.incident_phase === 'resolved' ? '#22c55e' : '#f59e0b');
+      if (res.observation.incident_phase === 'resolved') {
+        showBanner('✅ Incident Resolved — well done!', 'resolved');
+        toast('✅ Incident resolved!', '#22c55e');
+      } else {
+        showBanner('⏱ Episode ended — max steps reached', 'ended');
+        toast('⏱ Max steps reached', '#f59e0b');
+      }
     }
     if (res.info && res.info.efficiency_bonus)
       toast(`⚡ Efficiency bonus: +${res.info.efficiency_bonus}`, '#22c55e');
@@ -295,10 +324,12 @@ async function runDemo() {
   const task = document.getElementById('task-select').value;
   const partial = document.getElementById('partial-obs').checked;
   toast('Running optimal policy…', '#8b5cf6');
+  hideBanner();
   try {
     const res = await api(`/demo?task=${task}&partial_obs=${partial}`);
     sessionId = res.session_id;
-    stepCount = 0;
+    stepCount = res.steps.length;
+    currentMaxSteps = TASK_MAX_STEPS[task] || 12;
     done = true;
     optimalActions = TASK_OPTIMAL[task] || [];
 
@@ -306,21 +337,19 @@ async function runDemo() {
     document.getElementById('step-log').innerHTML = '';
     document.getElementById('incident-card').style.display = '';
 
-    // Replay steps into log
     for (const s of res.steps) {
       addStepLog(s.step, s.action, s.reward, s.done);
     }
 
-    // Show final observation from last step
     if (res.steps.length > 0) {
       const lastObs = res.steps[res.steps.length-1].observation;
       renderObservation(lastObs);
     }
 
-    // Score
     document.getElementById('score-val').textContent = (res.final_score * 100).toFixed(1);
     renderBreakdown(res.score_breakdown);
     disableActions();
+    showBanner(`✅ Auto-Solve complete — score: ${(res.final_score * 100).toFixed(1)}`, 'resolved');
     toast(`Demo complete — score: ${(res.final_score * 100).toFixed(1)}`, '#22c55e');
   } catch(e) { toast('Error: ' + e.message, '#ef4444'); }
 }
@@ -335,35 +364,38 @@ async function refreshScore() {
 }
 
 async function viewLeaderboard() {
+  const overlay = document.getElementById('lb-overlay');
+  const content = document.getElementById('lb-content');
+  overlay.classList.add('open');
   try {
     const res = await api('/leaderboard');
     const board = res.leaderboard;
-    let html = '<h3 style="margin-bottom:12px">🏆 Leaderboard</h3>';
+    let html = '';
+    let hasAny = false;
     for (const [task, entries] of Object.entries(board)) {
       if (!entries.length) continue;
-      html += `<strong style="color:#a5b4fc">${task}</strong><table style="width:100%;margin:6px 0 12px;font-size:.78rem;border-collapse:collapse">`;
-      html += '<tr style="color:#64748b"><th>Session</th><th>Score</th><th>Steps</th><th>Resolved</th></tr>';
+      hasAny = true;
+      html += `<div style="margin-bottom:18px"><strong style="color:#a5b4fc;font-size:.9rem">${task}</strong><table style="width:100%;margin:8px 0 0;font-size:.78rem;border-collapse:collapse">`;
+      html += '<tr style="color:#64748b"><th style="padding:5px 10px;text-align:left">Session</th><th style="padding:5px 10px">Score</th><th style="padding:5px 10px">Steps</th><th style="padding:5px 10px">Resolved</th></tr>';
       for (const e of entries) {
-        html += `<tr><td style="font-family:monospace">${e.session_id.slice(0,14)}…</td><td style="color:#818cf8">${(e.score*100).toFixed(1)}</td><td>${e.steps}</td><td>${e.resolved ? '✅':'❌'}</td></tr>`;
+        html += `<tr style="border-top:1px solid #2a3347"><td style="padding:5px 10px;font-family:monospace;font-size:.75rem">${e.session_id.slice(0,16)}…</td><td style="padding:5px 10px;color:#818cf8;font-weight:600">${(e.score*100).toFixed(1)}</td><td style="padding:5px 10px">${e.steps}</td><td style="padding:5px 10px">${e.resolved ? '✅':'❌'}</td></tr>`;
       }
-      html += '</table>';
+      html += '</table></div>';
     }
-    if (!html.includes('<tr><td')) html += '<p style="color:#64748b;font-size:.85rem">No scores yet — run some episodes!</p>';
-    const win = window.open('', '_blank', 'width=600,height=500');
-    win.document.write(`<html><head><title>Leaderboard</title><style>body{background:#0d0f14;color:#e2e8f0;font-family:Inter,sans-serif;padding:24px}table{color:#e2e8f0}th,td{padding:6px 12px;text-align:left;border-bottom:1px solid #2a3347}</style></head><body>${html}</body></html>`);
-  } catch(e) { toast('Could not load leaderboard', '#ef4444'); }
+    if (!hasAny) html = '<p style="color:#64748b;font-size:.85rem;margin-top:8px">No scores yet — run some episodes first!</p>';
+    content.innerHTML = html;
+  } catch(e) { content.innerHTML = '<p style="color:#ef4444">Could not load leaderboard.</p>'; }
+}
+
+function closeLB(e) {
+  if (!e || e.target === document.getElementById('lb-overlay') || e.currentTarget.id === 'lb-close')
+    document.getElementById('lb-overlay').classList.remove('open');
 }
 
 function renderObservation(obs) {
   if (!obs) return;
 
-  // Phase
-  const phaseEl = document.getElementById('m-phase');
-  phaseEl.textContent = obs.incident_phase;
-  phaseEl.className = 'metric-value';
-  if (obs.incident_phase === 'resolved') phaseEl.style.color = '#22c55e';
-  else if (obs.incident_phase === 'monitoring') phaseEl.style.color = '#f59e0b';
-  else phaseEl.style.color = '#f87171';
+  // (Phase removed from metrics bar — shown via banner on completion)
 
   // Metrics
   const m = obs.metrics || {};
@@ -372,8 +404,7 @@ function renderObservation(obs) {
   setMetric('m-cpu', m.cpu_usage + '%', m.cpu_usage > 80 ? 'crit' : m.cpu_usage > 65 ? 'warn' : 'ok');
   setMetric('m-mem', m.memory_usage + '%', m.memory_usage > 85 ? 'crit' : m.memory_usage > 70 ? 'warn' : 'ok');
 
-  const maxSteps = TASK_OPTIMAL[obs.task] ? 12 : '?';
-  document.getElementById('m-step').textContent = `${stepCount} / ${maxSteps}`;
+  document.getElementById('m-step').textContent = `${stepCount} / ${currentMaxSteps}`;
 
   // Incident card
   document.getElementById('inc-title').textContent = obs.incident_title;
@@ -451,6 +482,19 @@ function renderBreakdown(breakdown) {
 
 function disableActions() {
   document.querySelectorAll('.action-btn').forEach(b => b.disabled = true);
+}
+
+function showBanner(msg, type) {
+  const b = document.getElementById('status-banner');
+  b.textContent = msg;
+  b.className = type;
+  b.style.display = 'block';
+}
+
+function hideBanner() {
+  const b = document.getElementById('status-banner');
+  b.style.display = 'none';
+  b.className = '';
 }
 </script>
 </body>

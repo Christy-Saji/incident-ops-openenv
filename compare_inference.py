@@ -26,7 +26,7 @@ SYSTEM_PROMPT = (
     "Do not explain your reasoning. Just output the action word."
 ).format(", ".join(VALID_ACTIONS))
 
-TASKS = ["easy", "medium", "hard"]
+TASKS = ["easy", "medium", "hard", "network", "memory_leak", "disk_full"]
 
 
 # ---------------------------------------------------------------------------

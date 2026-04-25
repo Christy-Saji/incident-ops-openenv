@@ -1,4 +1,16 @@
-"""Task configurations for realistic DevOps incident response scenarios."""
+"""Task configurations for realistic DevOps incident response scenarios.
+
+Hint key routing (environment.py dispatches each inspect action to its own key):
+  inspect_auth_logs        → log_hints
+  inspect_db_metrics       → db_hints
+  inspect_deploy_history   → recent_deploys + runbook_hint
+  inspect_network_topology → network_hints
+  inspect_memory_profile   → memory_hints
+  inspect_disk_usage       → disk_hints
+
+For tasks where a particular inspect is irrelevant, the hint key contains a
+'not the root cause' message so the agent learns not to waste steps.
+"""
 
 VALID_TASKS = ["easy", "medium", "hard", "network", "memory_leak", "disk_full"]
 
@@ -34,6 +46,15 @@ TASK_CONFIGS = {
         ],
         "db_hints": [
             "db metrics: healthy p95 latency, normal connection count",
+        ],
+        "network_hints": [
+            "network log: no BGP anomalies detected — network layer is healthy",
+        ],
+        "memory_hints": [
+            "memory profile: heap usage normal — no OOM kills detected",
+        ],
+        "disk_hints": [
+            "disk usage: /var/log at 18% — log rotation is healthy",
         ],
         "runbook_hint": "Bad deploys should usually be mitigated by rollback before restart.",
         "required_diagnostics": ["inspect_deploy_history"],
@@ -77,6 +98,15 @@ TASK_CONFIGS = {
         "db_hints": [
             "db metrics: cpu pegged at 92%, read replica lag increasing",
             "db metrics: no schema migration running, saturation tracks request volume",
+        ],
+        "network_hints": [
+            "network log: no routing anomalies — network layer is healthy",
+        ],
+        "memory_hints": [
+            "memory profile: all services within normal heap bounds",
+        ],
+        "disk_hints": [
+            "disk usage: /var/log at 22% — log rotation is healthy",
         ],
         "runbook_hint": "Traffic spikes are usually mitigated by scaling the DB and shifting traffic.",
         "required_diagnostics": ["inspect_db_metrics"],
@@ -125,6 +155,15 @@ TASK_CONFIGS = {
         "db_hints": [
             "db metrics: cpu 96%, connection queue backed up",
             "db metrics: saturation appears secondary to auth retry storm",
+        ],
+        "network_hints": [
+            "network log: no routing anomalies — network layer is healthy",
+        ],
+        "memory_hints": [
+            "memory profile: heap usage within bounds — not contributing to outage",
+        ],
+        "disk_hints": [
+            "disk usage: /var/log at 31% — log rotation is healthy",
         ],
         "runbook_hint": "For retry storms, rollback the bad deploy first, then reduce downstream pressure.",
         "required_diagnostics": [
@@ -194,12 +233,21 @@ TASK_CONFIGS = {
             "network config pushed to edge routers 25 minutes ago",
         ],
         "log_hints": [
+            "auth log: no auth deploy or errors detected — auth service is not the root cause",
+        ],
+        "db_hints": [
+            "db metrics: nominal latency, no connection pressure — db is not the cause",
+        ],
+        "network_hints": [
             "network log: unexpected AS path prepend from upstream peer AS64500",
             "network log: eu-west-2 edge advertising /21 prefix via longer path since 14:02 UTC",
             "network log: traffic to eu-west-2 traversing 4 extra hops through AS64500",
         ],
-        "db_hints": [
-            "db metrics: nominal latency, no connection pressure — db is not the cause",
+        "memory_hints": [
+            "memory profile: all pods within normal memory bounds — not the root cause",
+        ],
+        "disk_hints": [
+            "disk usage: /var/log at 14% — log rotation is healthy",
         ],
         "runbook_hint": (
             "BGP route leaks are mitigated by withdrawing the leaked route and failing over "
@@ -254,13 +302,22 @@ TASK_CONFIGS = {
             "no infra changes in the last 24 hours",
         ],
         "log_hints": [
-            "payment-service log: heap allocation growing unbounded in transaction cache",
-            "payment-service log: OOMKilled signal received — memory limit 512Mi exceeded",
-            "k8s log: pod payment-service-7f9d restarted 3 times, back-off delay active",
+            "auth log: auth service stable, no errors — auth is not the root cause",
         ],
         "db_hints": [
             "db metrics: connection spike every 8 minutes correlates with pod restart timing",
             "db metrics: max_connections reached during payment-service cold-start",
+        ],
+        "network_hints": [
+            "network log: no BGP or routing anomalies — network layer is healthy",
+        ],
+        "memory_hints": [
+            "payment-service log: heap allocation growing unbounded in transaction cache",
+            "payment-service log: OOMKilled signal received — memory limit 512Mi exceeded",
+            "k8s log: pod payment-service-7f9d restarted 3 times, back-off delay active",
+        ],
+        "disk_hints": [
+            "disk usage: /var/log at 19% — log rotation is healthy",
         ],
         "runbook_hint": (
             "OOM loops from a bad deploy should be stopped by rolling back the release. "
@@ -316,12 +373,21 @@ TASK_CONFIGS = {
             "logging verbosity increased to DEBUG level 4 hours ago for troubleshooting",
         ],
         "log_hints": [
-            "system log: logrotate error — disk full, cannot rename /var/log/api/current.log",
-            "system log: DEBUG logging enabled at 10:15 UTC — log volume increased 8×",
-            "system log: /var/log at 98.3% — 420MB free of 20GB partition",
+            "auth log: auth service nominal, no errors — auth is not the root cause",
         ],
         "db_hints": [
             "db metrics: nominal — not involved in this incident",
+        ],
+        "network_hints": [
+            "network log: no routing anomalies — network layer is healthy",
+        ],
+        "memory_hints": [
+            "memory profile: all services within normal heap bounds — not the root cause",
+        ],
+        "disk_hints": [
+            "system log: logrotate error — disk full, cannot rename /var/log/api/current.log",
+            "system log: DEBUG logging enabled at 10:15 UTC — log volume increased 8×",
+            "system log: /var/log at 98.3% — 420MB free of 20GB partition",
         ],
         "runbook_hint": (
             "Disk saturation from logs is mitigated by archiving old logs, "
