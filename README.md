@@ -141,6 +141,23 @@ Production incidents are a meaningful testbed for LLM training because they requ
 - a training setup with observable reward improvement
 - a demonstration that operational workflows can be represented as learnable environments rather than static prompt tasks
 
+## Colab Notebook
+
+The notebook at [colab_training.ipynb](./colab_training.ipynb) performs the following steps:
+
+1. installs dependencies
+2. clones the repository
+3. smoke-tests the environment and reward functions
+4. runs a short GRPO sanity pass
+5. runs the full SFT + GRPO training pipeline
+6. generates `reward_curve.png`
+7. runs the before/after comparison script
+8. optionally pushes the trained model to Hugging Face Hub
+
+Direct Colab launch:
+
+[https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/master/colab_training.ipynb](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/master/colab_training.ipynb)
+
 ## Demo Endpoints
 
 The environment exposes the following endpoints:
@@ -187,19 +204,3 @@ docker build -t incident-ops-openenv .
 docker run --rm -p 7860:7860 incident-ops-openenv
 ```
 
-## Colab Notebook
-
-The notebook at [colab_training.ipynb](./colab_training.ipynb) performs the following steps:
-
-1. installs dependencies
-2. clones the repository
-3. smoke-tests the environment and reward functions
-4. runs a short GRPO sanity pass
-5. runs the full SFT + GRPO training pipeline
-6. generates `reward_curve.png`
-7. runs the before/after comparison script
-8. optionally pushes the trained model to Hugging Face Hub
-
-Direct Colab launch:
-
-[https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/master/colab_training.ipynb](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/master/colab_training.ipynb)
