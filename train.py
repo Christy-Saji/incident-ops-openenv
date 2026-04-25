@@ -84,6 +84,11 @@ def step_reward_func(prompts, completions, **kwargs) -> List[float]:
     Restores approximate mid-episode state by replaying recent_actions from the
     serialised observation in the user message before scoring the candidate action.
     This fixes the bug where mid-episode prompts were always evaluated from step 0.
+
+    NaN safety: the entire env instantiation + step is wrapped in try/except.
+    A bad task name, corrupted prompt, or any env error returns -0.5 instead
+    of propagating an exception that would produce a NaN reward in the batch.
+    The return value is also explicitly clamped to [-1.0, 1.0].
     """
     rewards = []
     for prompt, completion in zip(prompts, completions):
@@ -93,24 +98,32 @@ def step_reward_func(prompts, completions, **kwargs) -> List[float]:
             rewards.append(-0.5)
             continue
 
-        task = "easy"
-        recent_actions: List[str] = []
         try:
-            state_dict = json.loads(prompt[-1]["content"])
-            task = state_dict.get("task", "easy")
-            recent_actions = state_dict.get("recent_actions", [])
+            task = "easy"
+            recent_actions: List[str] = []
+            try:
+                state_dict = json.loads(prompt[-1]["content"])
+                task = state_dict.get("task", "easy")
+                if task not in TASK_CONFIGS:   # guard against unknown task names
+                    task = "easy"
+                recent_actions = state_dict.get("recent_actions", [])
+            except Exception:
+                pass
+
+            env = DevOpsEnv(task=task)
+            env.reset()
+            # Replay the recent actions to reconstruct approximate mid-episode state
+            for prev in recent_actions:
+                if prev in VALID_ACTIONS:
+                    env.step(prev)
+
+            _, step_reward, _, _ = env.step(action)
+            # Clamp to [-1, 1] — env already clamps to [-0.25, 1.0] but be explicit
+            rewards.append(float(max(-1.0, min(1.0, step_reward))))
+
         except Exception:
-            pass
-
-        env = DevOpsEnv(task=task)
-        env.reset()
-        # Replay the recent actions to reconstruct approximate mid-episode state
-        for prev in recent_actions:
-            if prev in VALID_ACTIONS:
-                env.step(prev)
-
-        _, step_reward, _, _ = env.step(action)
-        rewards.append(float(step_reward))
+            # Fallback: any env error → neutral negative reward, not NaN
+            rewards.append(-0.5)
 
     return rewards
 
@@ -571,6 +584,7 @@ def main():
         output_dir="outputs_grpo",
         learning_rate=5e-6,              # halved from 1e-5 — reduces KL explosion risk
         lr_scheduler_type="cosine",
+        warmup_steps=20,                 # NaN fix: let optimizer calibrate before full LR kicks in
         max_steps=300,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=4,
