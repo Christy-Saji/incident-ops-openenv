@@ -99,6 +99,9 @@ The notebook also includes a short sanity run before the full training pass to v
 ![Reward Curve](https://raw.githubusercontent.com/Christy-Saji/incident-ops-openenv/master/reward_curve.png)
 
 `reward_curve.png` is committed to the repository as a persistent training artifact.
+The plot shows a clear upward reward trend over the course of training. Early steps are volatile and frequently negative, which is consistent with an initially weak policy exploring poor actions. As training progresses, the smoothed reward rises steadily and remains substantially above the starting region, indicating that the model is learning action sequences that align better with the environment's reward structure. The continued variance in the raw trace suggests that the task remains challenging and the policy is not fully stable, but the overall trajectory is positive and consistent with measurable improvement rather than noise alone.
+
+
 
 ### Raw Training Logs
 
