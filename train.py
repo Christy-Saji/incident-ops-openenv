@@ -27,6 +27,7 @@ import csv
 import json
 import os
 import random
+import re
 from typing import List
 
 from datasets import Dataset
@@ -60,6 +61,33 @@ system_prompt = (
 ).format(", ".join(VALID_ACTIONS))
 
 
+def _extract_action(text: str) -> str | None:
+    """Extract exactly one valid action from model text.
+
+    Handles outputs like:
+      - "inspect_deploy_history"
+      - "Action: inspect_deploy_history"
+      - JSON snippets containing an action token
+    """
+    if not isinstance(text, str):
+        return None
+
+    cleaned = text.strip().lower().replace("`", " ").replace("\n", " ")
+    if cleaned in VALID_ACTIONS:
+        return cleaned
+
+    # Choose the earliest action mention instead of VALID_ACTIONS order.
+    best_action = None
+    best_pos = None
+    for action in VALID_ACTIONS:
+        match = re.search(rf"\b{re.escape(action)}\b", cleaned)
+        if match:
+            if best_pos is None or match.start() < best_pos:
+                best_action = action
+                best_pos = match.start()
+    return best_action
+
+
 # ---------------------------------------------------------------------------
 # 1. Reward Functions (4 independent signals)
 # ---------------------------------------------------------------------------
@@ -73,8 +101,9 @@ def format_reward_func(prompts, completions, **kwargs) -> List[float]:
     """
     rewards = []
     for completion in completions:
-        text = completion[0]["content"].strip()
-        rewards.append(0.3 if text in VALID_ACTIONS else -0.5)
+        text = completion[0]["content"]
+        action = _extract_action(text)
+        rewards.append(0.3 if action in VALID_ACTIONS else -0.5)
     return rewards
 
 
@@ -92,7 +121,7 @@ def step_reward_func(prompts, completions, **kwargs) -> List[float]:
     """
     rewards = []
     for prompt, completion in zip(prompts, completions):
-        action = completion[0]["content"].strip()
+        action = _extract_action(completion[0]["content"] or "")
 
         if action not in VALID_ACTIONS:
             rewards.append(-0.5)
@@ -147,7 +176,11 @@ def anti_cheat_reward_func(prompts, completions, **kwargs) -> List[float]:
     """
     rewards = []
     for i, completion in enumerate(completions):
-        action = completion[0]["content"].strip()
+        action = _extract_action(completion[0]["content"] or "")
+
+        if action not in VALID_ACTIONS:
+            rewards.append(-0.5)
+            continue
 
         # Safely get the matching prompt — falls back to [] if prompts is shorter
         # (this happens in unit tests where prompts=[] is passed intentionally)
@@ -190,7 +223,7 @@ def task_alignment_reward_func(prompts, completions, **kwargs) -> List[float]:
     """
     rewards = []
     for prompt, completion in zip(prompts, completions):
-        action = completion[0]["content"].strip()
+        action = _extract_action(completion[0]["content"] or "")
 
         if action not in VALID_ACTIONS:
             rewards.append(-0.3)
@@ -239,7 +272,7 @@ def sequence_progress_reward_func(prompts, completions, **kwargs) -> List[float]
     """
     rewards = []
     for prompt, completion in zip(prompts, completions):
-        action = completion[0]["content"].strip()
+        action = _extract_action(completion[0]["content"] or "")
 
         if action not in VALID_ACTIONS:
             rewards.append(0.0)
@@ -289,7 +322,7 @@ def diversity_reward_func(prompts, completions, **kwargs) -> List[float]:
     uniform negative signal so the KL term pushes the policy back toward
     exploration.  It returns 0.0 when the group shows healthy diversity.
     """
-    actions = [c[0]["content"].strip() for c in completions]
+    actions = [_extract_action(c[0]["content"] or "") or "" for c in completions]
     valid_actions = [a for a in actions if a in VALID_ACTIONS]
     unique_count = len(set(valid_actions)) if valid_actions else 0
 
@@ -346,8 +379,17 @@ class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
         rewards/format_reward_func  ->  reward_format_reward_func
         reward_format_reward_func   ->  reward_format_reward_func (unchanged)
         """
+        # Newer TRL keys often include aggregate suffixes:
+        #   rewards/format_reward_func/mean
+        #   rewards/format_reward_func/std
+        # We log means into canonical reward_* columns and ignore std columns.
         if key.startswith("rewards/"):
-            return "reward_" + key[len("rewards/"):]
+            key = "reward_" + key[len("rewards/"):]
+        key = key.replace("/", "_")
+
+        # Canonicalize *_mean -> base metric column.
+        if key.endswith("_mean"):
+            key = key[:-5]
         return key
 
     def on_log(self, args, state, control, logs=None, **kwargs):
@@ -359,6 +401,9 @@ class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
         for raw_key, value in logs.items():
             if raw_key == "reward" or raw_key.startswith("reward_") or raw_key.startswith("rewards/"):
                 col = self._normalize(raw_key)
+                # Skip std/dev fields; keep only scalar reward means in CSV.
+                if col.endswith("_std"):
+                    continue
                 row[col] = value
 
         # Fill any canonical column that TRL didn't emit this step.

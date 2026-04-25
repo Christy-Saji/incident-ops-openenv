@@ -13,6 +13,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from typing import Optional
@@ -28,6 +29,26 @@ SYSTEM_PROMPT = (
 ).format(", ".join(VALID_ACTIONS))
 
 TASKS = ["easy", "medium", "hard", "network", "memory_leak", "disk_full"]
+
+
+def _extract_action(text: str) -> str | None:
+    """Extract the earliest valid action mention from model output."""
+    if not isinstance(text, str):
+        return None
+
+    cleaned = text.strip().lower().replace("`", " ").replace("\n", " ")
+    if cleaned in VALID_ACTIONS:
+        return cleaned
+
+    best_action = None
+    best_pos = None
+    for action in VALID_ACTIONS:
+        match = re.search(rf"\b{re.escape(action)}\b", cleaned)
+        if match:
+            if best_pos is None or match.start() < best_pos:
+                best_action = action
+                best_pos = match.start()
+    return best_action
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +71,10 @@ def _load_model(model_path: str):
         load_in_4bit=True,
     )
     FastLanguageModel.for_inference(model)
+    # Avoid transformers warning when both max_length and max_new_tokens are set.
+    # We always control generation with max_new_tokens in this script.
+    if getattr(model, "generation_config", None) is not None:
+        model.generation_config.max_length = None
     return model, tokenizer
 
 
@@ -82,7 +107,7 @@ def _generate_action_hf_api(model_id: str, hf_token: str, state: dict) -> str:
                 max_tokens=32,
                 temperature=0.01,   # near-greedy; API does not always support temp=0
             )
-            raw = response.choices[0].message.content.strip().lower()
+            raw = response.choices[0].message.content
             break
         except Exception as e:
             if attempt == 2:
@@ -90,9 +115,9 @@ def _generate_action_hf_api(model_id: str, hf_token: str, state: dict) -> str:
                 return "no_op"
             time.sleep(2 ** attempt)   # exponential back-off
 
-    for action in VALID_ACTIONS:
-        if action in raw:
-            return action
+    action = _extract_action(raw or "")
+    if action in VALID_ACTIONS:
+        return action
     return "no_op"
 
 
@@ -124,12 +149,10 @@ def _generate_action(model, tokenizer, state: dict) -> str:
 
     # Decode only the newly generated tokens
     new_ids = output_ids[0][inputs["input_ids"].shape[1]:]
-    raw = tokenizer.decode(new_ids, skip_special_tokens=True).strip().lower()
-
-    # Match against valid actions
-    for action in VALID_ACTIONS:
-        if action in raw:
-            return action
+    raw = tokenizer.decode(new_ids, skip_special_tokens=True)
+    action = _extract_action(raw)
+    if action in VALID_ACTIONS:
+        return action
 
     return "no_op"  # fallback if nothing matched
 
@@ -145,6 +168,9 @@ def run_episode(
     env = DevOpsEnv(task=task)
     state = env.reset()
     actions_log = []
+    repeat_streak = 0
+    last_action = None
+    loop_penalty = 0.0
 
     print(f"\n  [{label}] task={task}")
     for step_num in range(1, env.max_steps + 1):
@@ -154,11 +180,29 @@ def run_episode(
             action = _generate_action(model_or_id, tokenizer_or_token, state)
         state, reward, done, info = env.step(action)
         actions_log.append(action)
+
+        if action == last_action:
+            repeat_streak += 1
+        else:
+            repeat_streak = 1
+            last_action = action
+
+        # Tiny evaluation-time penalty + fail-fast if model loops same action.
+        # This prevents long "spam" traces from dominating logs.
+        if repeat_streak >= 3 and not state.get("resolved", False):
+            loop_penalty += 0.03
+            print(
+                f"    step={step_num:2d}  action={action:<28s}  reward={reward:+.2f}  "
+                f"loop_detected=True -> early_stop"
+            )
+            break
+
         print(f"    step={step_num:2d}  action={action:<28s}  reward={reward:+.2f}")
         if done:
             break
 
     score, _ = compute_score(task, env._state)
+    score = max(0.0, score - loop_penalty)
     resolved = env._state["resolved"]
     print(f"  [{label}] FINAL score={score:.2f}  resolved={resolved}")
     return score, resolved, actions_log

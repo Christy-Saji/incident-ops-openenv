@@ -108,11 +108,16 @@ def extract_action(text: str) -> str | None:
     if normalized in VALID_ACTIONS:
         return normalized
 
+    best_action = None
+    best_pos = None
     for valid in VALID_ACTIONS:
-        if re.search(rf"\b{re.escape(valid)}\b", normalized):
-            return valid
+        match = re.search(rf"\b{re.escape(valid)}\b", normalized)
+        if match:
+            if best_pos is None or match.start() < best_pos:
+                best_action = valid
+                best_pos = match.start()
 
-    return None
+    return best_action
 
 
 def extract_response_text(response) -> str:
@@ -203,6 +208,9 @@ def run_task(task_name: str, client: OpenAI | None, model: str | None) -> tuple[
     rewards: list[str] = []
     success = False
     score = 0.0
+    repeat_streak = 0
+    last_action = None
+    loop_penalty = 0.0
 
     for step_num in range(1, env.max_steps + 1):
         state["all_actions_taken"] = list(env._state["actions_taken"])
@@ -218,15 +226,27 @@ def run_task(task_name: str, client: OpenAI | None, model: str | None) -> tuple[
         rewards.append(f"{reward:.2f}")
         error_msg = fallback_reason or info.get("error", "null")
 
+        if action == last_action:
+            repeat_streak += 1
+        else:
+            repeat_streak = 1
+            last_action = action
+
         print(
             f"[STEP] step={step_num} action={action} reward={reward:.2f} "
             f"done={str(done).lower()} error={error_msg}"
         )
 
+        if repeat_streak >= 3 and not state.get("resolved", False):
+            loop_penalty += 0.03
+            print("[STEP] loop_detected=true early_stop=true")
+            break
+
         if done:
             break
 
     score, _ = compute_score(task_name, env._state)
+    score = max(0.0, score - loop_penalty)
     success = env._state["resolved"]
 
     print(
