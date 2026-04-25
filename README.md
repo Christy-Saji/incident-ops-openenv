@@ -15,6 +15,7 @@ Theme 3 - World Modeling
 Sub-theme 3.1 - Professional Tasks
 
 Hugging Face Space: [incident-ops-openenv](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv)  
+Trained Model: [sre-agent-llama3-grpo](https://huggingface.co/chritsysajii/sre-agent-llama3-grpo)  
 Open in Colab: [colab_training.ipynb](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/master/colab_training.ipynb)  
 GitHub Notebook: [colab_training.ipynb](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/colab_training.ipynb)  
 Training Reward Log CSV: [reward_log.csv](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/reward_log.csv)  
@@ -102,6 +103,8 @@ The notebook also includes a short sanity run before the full training pass to v
 The plot shows a clear upward reward trend over the course of training. Early steps are volatile and frequently negative, which is consistent with an initially weak policy exploring poor actions. As training progresses, the smoothed reward rises steadily and remains substantially above the starting region, indicating that the model is learning action sequences that align better with the environment's reward structure. The continued variance in the raw trace suggests that the task remains challenging and the policy is not fully stable, but the overall trajectory is positive and consistent with measurable improvement rather than noise alone.
 
 
+
+The plot shows a clear upward reward trend over the course of training. Early steps are volatile and frequently negative, which is consistent with an initially weak policy exploring poor actions. As training progresses, the smoothed reward rises steadily and remains substantially above the starting region, indicating that the model is learning action sequences that align better with the environment's reward structure. The continued variance in the raw trace suggests that the task remains challenging and the policy is not fully stable, but the overall trajectory is positive and consistent with measurable improvement rather than noise alone.
 
 ### Raw Training Logs
 
