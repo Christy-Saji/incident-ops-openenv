@@ -628,13 +628,13 @@ def main():
     print("[3] Phase 2 — Generating GRPO Curriculum (all 6 tasks)...")
     grpo_dataset = generate_prompts()
 
-    print("[4] Setting up GRPO Config (max_steps=300)...")
+    print("[4] Setting up GRPO Config (max_steps=60)...")
     training_args = GRPOConfig(
         output_dir="outputs_grpo",
         learning_rate=5e-6,              # halved from 1e-5 — reduces KL explosion risk
         lr_scheduler_type="cosine",
         warmup_steps=20,                 # NaN fix: let optimizer calibrate before full LR kicks in
-        max_steps=300,
+        max_steps=60,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=4,
         logging_steps=1,
