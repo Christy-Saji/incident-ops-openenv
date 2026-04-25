@@ -14,7 +14,7 @@ OpenEnv Hackathon 2026
 Theme 3 - World Modeling  
 Sub-theme 3.1 - Professional Tasks
 
-Hugging Face Space: [incident-ops-openenv](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv)  
+Hugging Face Space: [incident-ops-openenv-final](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv-final)  
 Trained Model: [sre-agent-llama3-grpo](https://huggingface.co/chritsysajii/sre-agent-llama3-grpo)  
 Open in Colab: [colab_training.ipynb](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/master/colab_training.ipynb)  
 GitHub Notebook: [colab_training.ipynb](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/colab_training.ipynb)  
