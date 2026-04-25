@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+*.pyo
 .env
 .venv
 venv/
@@ -8,3 +9,12 @@ env.bak/
 .DS_Store
 output.txt
 .pytest_cache/
+
+# Training outputs (large — keep locally, not in git)
+outputs_grpo/
+outputs_sft/
+outputs_sanity/
+trained_sre_agent/
+
+# Any other venv-style directories
+*env/
