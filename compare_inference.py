@@ -194,6 +194,9 @@ def main():
     )
     args = parser.parse_args()
 
+    # Results store — initialized before either phase writes to it
+    results = {task: {} for task in TASKS}
+
     if args.use_hf_api and not args.hf_token:
         print("ERROR: --use-hf-api requires --hf-token or the HF_TOKEN environment variable.")
         sys.exit(1)
