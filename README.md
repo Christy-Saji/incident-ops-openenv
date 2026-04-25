@@ -8,7 +8,7 @@ app_file: app.py
 pinned: false
 ---
 
-# 🚨 DevOps Incident Triage — SRE Agent OpenEnv
+# 🚨 DevOps Incident Response — SRE Agent OpenEnv
 
 **OpenEnv Hackathon 2026 · Theme #3 — World Modeling · Sub-theme #3.1 — Professional Tasks**
 
