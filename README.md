@@ -20,7 +20,7 @@ Open in Colab: [colab_training.ipynb](https://colab.research.google.com/github/C
 GitHub Notebook: [colab_training.ipynb](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/colab_training.ipynb)  
 Training Reward Log CSV: [reward_log.csv](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/reward_log.csv)  
 Training Reward Curve PNG: [reward_curve.png](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/reward_curve.png)  
-Hugging Face Blog Post: [placeholder](#)
+Hugging Face Blog Post: [Blog.MD](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv-final/blob/main/Blog.MD)
 
 Incident Ops OpenEnv is an OpenEnv benchmark for training language models to perform structured incident response in a professional operations setting. The environment evaluates whether a model can inspect evidence, select appropriate mitigations, communicate status, and resolve only after the system is stable.
 
