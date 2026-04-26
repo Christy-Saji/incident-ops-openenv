@@ -20,6 +20,7 @@ Open in Colab: [colab_training.ipynb](https://colab.research.google.com/github/C
 GitHub Notebook: [colab_training.ipynb](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/colab_training.ipynb)  
 Training Reward Log CSV: [reward_log.csv](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/reward_log.csv)  
 Training Reward Curve PNG: [reward_curve.png](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/reward_curve.png)  
+Reward Component Plot PNG: [reward_components_mean.png](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/reward_components_mean.png)  
 Hugging Face Blog Post: [Blog.MD](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv-final/blob/main/Blog.MD)
 
 Incident Ops OpenEnv is an OpenEnv benchmark for training language models to perform structured incident response in a professional operations setting. The environment evaluates whether a model can inspect evidence, select appropriate mitigations, communicate status, and resolve only after the system is stable.
@@ -108,6 +109,16 @@ The plot shows a clear upward reward trend over the course of training. Early st
 [Open reward_log.csv directly](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/reward_log.csv)
 
 The full numeric training trace is available in `reward_log.csv` and is linked above as the raw evidence underlying the plotted reward curve.
+
+### Reward Component Contribution
+
+[Open reward component plot directly](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/reward_components_mean.png)
+
+![Reward Component Contribution](https://raw.githubusercontent.com/Christy-Saji/incident-ops-openenv/master/reward_components_mean.png)
+
+`reward_components_mean.png` is committed to the repository as a second training artifact for reward attribution.
+
+Short inference: the strongest average contributors are `reward_progress_delta_reward_func` and `reward_terminal_outcome_reward_func`, which indicates the policy is increasingly rewarded for making measurable recovery progress and finishing episodes in stable terminal states. The lower mean value for `reward_step_reward_func` suggests syntactic action correctness alone is not sufficient to score highly; the model gets larger returns when action sequences produce task-relevant state improvements.
 
 ### Before vs After Evaluation
 
