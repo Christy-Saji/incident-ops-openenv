@@ -20,7 +20,6 @@ Open in Colab: [colab_training.ipynb](https://colab.research.google.com/github/C
 GitHub Notebook: [colab_training.ipynb](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/colab_training.ipynb)  
 Training Reward Log CSV: [reward_log.csv](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/reward_log.csv)  
 Training Reward Curve PNG: [reward_curve.png](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/reward_curve.png)  
-Training Loss Curve PNG: [loss_curve.png](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/loss_curve.png)  
 Reward Component Plot PNG: [reward_components_mean.png](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/reward_components_mean.png)  
 Hugging Face Blog Post: [Blog.MD](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv-final/blob/main/Blog.MD)
 
@@ -104,14 +103,6 @@ The notebook also includes a short sanity run before the full training pass to v
 `reward_curve.png` is committed to the repository as a persistent training artifact.
 
 The plot shows a clear upward reward trend over the course of training. Early steps are volatile and frequently negative, which is consistent with an initially weak policy exploring poor actions. As training progresses, the smoothed reward rises steadily and remains substantially above the starting region, indicating that the model is learning action sequences that align better with the environment's reward structure. The continued variance in the raw trace suggests that the task remains challenging and the policy is not fully stable, but the overall trajectory is positive and consistent with measurable improvement rather than noise alone.
-
-### Loss Curve
-
-[Open loss curve image directly](https://github.com/Christy-Saji/incident-ops-openenv/blob/master/loss_curve.png)
-
-![Loss Curve](https://raw.githubusercontent.com/Christy-Saji/incident-ops-openenv/master/loss_curve.png)
-
-`loss_curve.png` is generated after GRPO training from the same `reward_log.csv` callback stream (when loss is present in trainer logs).
 
 ### Raw Training Logs
 
