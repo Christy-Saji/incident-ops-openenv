@@ -550,7 +550,7 @@ def diversity_reward_func(prompts, completions, **kwargs) -> List[float]:
 
 
 # ---------------------------------------------------------------------------
-# 2. Reward Curve Logger Callback
+# 2. Reward / Loss Logger Callback
 # ---------------------------------------------------------------------------
 
 try:
@@ -560,7 +560,7 @@ except ImportError:  # allow import on CPU-only machines without transformers
 
 
 class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
-    """Saves per-step reward metrics to a CSV for demo reward curves.
+    """Saves per-step reward and loss metrics to a CSV for demo plots.
 
     Handles both TRL naming conventions for per-function reward keys:
       - Old TRL (< ~0.15):  reward_format_reward_func   (underscore prefix)
@@ -568,13 +568,14 @@ class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
 
     All keys are normalised to the underscore form before writing so the
     CSV column names are stable regardless of which TRL version is installed.
-    Only rows where 'reward' is present are written — non-training log
-    events (LR warmup, checkpoint saves) are skipped.
+    Only rows where at least one of {'reward', 'loss'} is present are written
+    — non-training log events (LR warmup, checkpoint saves) are skipped.
     """
 
     # Canonical CSV column names.
     CSV_COLUMNS = [
         "step",
+        "loss",
         "reward",
         "reward_format_reward_func",
         "reward_step_reward_func",
@@ -613,13 +614,20 @@ class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
         return key
 
     def on_log(self, args, state, control, logs=None, **kwargs):
-        if logs is None or "reward" not in logs:
+        if logs is None:
+            return
+        if "reward" not in logs and "loss" not in logs:
             return
 
-        # Capture every reward-related key TRL emits and normalize it.
+        # Capture reward and loss keys that TRL emits and normalize reward names.
         row: dict = {"step": state.global_step}
         for raw_key, value in logs.items():
-            if raw_key == "reward" or raw_key.startswith("reward_") or raw_key.startswith("rewards/"):
+            if (
+                raw_key == "loss"
+                or raw_key == "reward"
+                or raw_key.startswith("reward_")
+                or raw_key.startswith("rewards/")
+            ):
                 col = self._normalize(raw_key)
                 # Skip std/dev fields; keep only scalar reward means in CSV.
                 if col.endswith("_std"):
@@ -712,7 +720,79 @@ def plot_reward_curve(
 
 
 # ---------------------------------------------------------------------------
-# 4. Curriculum Dataset Generation
+# 4. Loss Curve Plotter
+# ---------------------------------------------------------------------------
+
+def plot_loss_curve(
+    log_path: str = REWARD_LOG_PATH,
+    out_path: str = "loss_curve.png",
+    smooth_window: int = 10,
+) -> None:
+    """Single-panel training loss curve in the same visual style as reward."""
+    import numpy as np
+    import pandas as pd
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not os.path.exists(log_path):
+        print(f"[plot] Reward/loss log not found: {log_path}")
+        return
+
+    df = pd.read_csv(log_path)
+    if "loss" not in df.columns:
+        print("[plot] No 'loss' column found in log; skipping loss curve.")
+        return
+
+    for col in df.columns:
+        if col != "step":
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["step", "loss"]).sort_values("step").reset_index(drop=True)
+    if df.empty:
+        print("[plot] Loss column exists but has no numeric values; skipping loss curve.")
+        return
+
+    steps = df["step"].values
+    raw = df["loss"].values
+    smoothed = pd.Series(raw).rolling(smooth_window, min_periods=1, center=True).mean().values
+
+    mask = ~np.isnan(raw)
+    trend = None
+    if mask.sum() >= 2:
+        sl, ic = np.polyfit(steps[mask], raw[mask], 1)
+        trend = sl * steps + ic
+
+    BASE_BLUE = "#4C72B0"
+    LIGHT_BLUE = "#A8C4E0"
+
+    fig, ax = plt.subplots(figsize=(12, 5), facecolor="white")
+    fig.suptitle(
+        f"GRPO Training — DevOps Incident Triage SRE Agent\n"
+        f"{MODEL_ID.split('/')[-1]} + SFT warm-start + GRPO (loss view)",
+        fontsize=11, fontweight="bold",
+    )
+
+    ax.plot(steps, raw, color=LIGHT_BLUE, alpha=0.35, linewidth=0.8, label="raw")
+    ax.plot(steps, smoothed, color=BASE_BLUE, linewidth=2.2, label=f"smoothed (w={smooth_window})")
+    if trend is not None:
+        ax.plot(steps, trend, color="#888888", linewidth=1.2, linestyle="--", alpha=0.7, label="trend")
+
+    ax.axhline(0, color="#cccccc", linewidth=0.6, linestyle=":")
+    ax.set_title("Training Loss", fontsize=10, pad=6)
+    ax.set_xlabel("Training Step", fontsize=9)
+    ax.set_ylabel("Loss", fontsize=9)
+    ax.legend(fontsize=8, loc="upper right", framealpha=0.8)
+    ax.grid(True, alpha=0.3)
+    ax.tick_params(labelsize=8)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] Loss curve saved to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# 5. Curriculum Dataset Generation
 # ---------------------------------------------------------------------------
 
 def _make_prompt(state: dict) -> dict:
@@ -966,10 +1046,15 @@ def main():
     model.save_pretrained_merged("trained_sre_agent", tokenizer, save_method="merged_16bit")
     print(f"Training Complete! Reward log saved to {REWARD_LOG_PATH}")
 
-    print("[7] Generating reward curve plot...")
+    print("[7] Generating reward/loss curve plots...")
     plot_reward_curve(
         log_path=REWARD_LOG_PATH,
         out_path="reward_curve.png",
+        smooth_window=10,
+    )
+    plot_loss_curve(
+        log_path=REWARD_LOG_PATH,
+        out_path="loss_curve.png",
         smooth_window=10,
     )
 
