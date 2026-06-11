@@ -53,6 +53,7 @@ class TrainingConfig:
     max_prompt_length: int = 512
     max_completion_length: int = 32
     learning_rate: float = 1e-5
+    kl_coef: float = 0.04          # KL penalty — passed to GRPOConfig to slow catastrophic forgetting
     lr_scheduler_type: str = "cosine"
     warmup_steps: int = 8
     max_grad_norm: float = 0.3

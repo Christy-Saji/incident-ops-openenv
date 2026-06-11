@@ -30,7 +30,7 @@ model:
 
 training:
   # GRPO
-  grpo_max_steps: 300
+  grpo_max_steps: 500
   per_task_prompts: 8
   mid_episode_prompts: 60
 
@@ -43,6 +43,7 @@ training:
 
   # Optimiser
   learning_rate: 0.00001     # 1e-5
+  kl_coef: 0.04              # KL penalty — slows catastrophic forgetting on hard tasks
   lr_scheduler_type: "cosine"
   warmup_steps: 8
   max_grad_norm: 0.3

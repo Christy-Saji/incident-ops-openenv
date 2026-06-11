@@ -360,13 +360,13 @@ def progress_delta_reward_func(prompts, completions, **kwargs) -> List[float]:
 
             delta = after_progress - before_progress
             if delta > 0:
-                rewards.append(0.9)
+                rewards.append(0.5)
             elif action in {"acknowledge_incident", "post_status_update"}:
                 rewards.append(-0.6)
             elif action in before:
                 rewards.append(-0.5)
             else:
-                rewards.append(-0.1)
+                rewards.append(-0.35)
         except Exception:
             rewards.append(-0.4)
     return rewards
@@ -441,16 +441,19 @@ def terminal_outcome_reward_func(prompts, completions, **kwargs) -> List[float]:
             stable        = state.get("incident_phase") in {"monitoring", "resolved"}
             resolved      = bool(state.get("resolved", False))
 
-            reward = 3.2 * score_delta
+            reward = 1.5 * score_delta
+
+            history = state.get("actions_taken", [])
+            comms_done = "post_status_update" in history
 
             if resolved and stable and mit_complete:
-                reward += 3.0
+                reward += 3.0 if comms_done else 1.0
             elif action == "resolve_incident" and info.get("error") == "incident_not_stable":
                 reward -= 1.5
             elif action == "resolve_incident" and not (stable and mit_complete):
                 reward -= 1.3
 
-            history = state.get("actions_taken", [])
+            # history already set above for comms gate
             if len(history) >= 4 and len(set(history[-4:])) == 1:
                 reward -= 1.0
             if action in _FILLER_ACTIONS and len(history) > 2:
@@ -490,7 +493,9 @@ def diversity_reward_func(prompts, completions, **kwargs) -> List[float]:
     unique_count = len(set(valid_actions)) if valid_actions else 0
 
     if unique_count <= 1:
-        return [-0.25] * len(completions)
+        return [-0.5] * len(completions)
+    elif unique_count == 2:
+        return [-0.1] * len(completions)
     return [0.0] * len(completions)
 
 

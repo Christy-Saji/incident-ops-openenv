@@ -102,14 +102,14 @@ def run(config: "TrainConfig") -> None:
         lr_scheduler_type="cosine",
         logging_steps=1,
         dataset_text_field="text",
-        max_seq_length=config.model.max_seq_length,
+        max_length=config.model.max_seq_length,
         fp16=not torch.cuda.is_bf16_supported(),
         bf16=torch.cuda.is_bf16_supported(),
     )
 
     sft_trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         args=sft_args,
         train_dataset=sft_dataset,
     )
@@ -140,6 +140,7 @@ def run(config: "TrainConfig") -> None:
         max_prompt_length=config.training.max_prompt_length,
         max_completion_length=config.training.max_completion_length,
         temperature=config.training.temperature,
+        beta=config.training.kl_coef,           # KL penalty — prevents catastrophic forgetting
         # Checkpoint resumption
         save_steps=config.training.save_steps,
         save_total_limit=config.training.save_total_limit,
