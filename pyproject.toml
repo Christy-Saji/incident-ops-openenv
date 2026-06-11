@@ -4,21 +4,54 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "devops-openenv"
-version = "0.1.0"
-description = "OpenEnv benchmark for realistic SaaS incident triage."
+version = "2.0.0"
+description = "RL benchmark for SRE incident triage — SFT → GRPO training of a language model across 6 production incident scenarios."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi",
     "openai",
-    "openenv-core>=0.2.0",
     "pydantic",
     "pyyaml",
     "uvicorn",
 ]
 
+[project.optional-dependencies]
+train = [
+    "unsloth",
+    "trl>=0.12",
+    "transformers>=4.45",
+    "datasets",
+    "torch",
+    "pandas",
+    "matplotlib",
+    "numpy",
+]
+eval = [
+    "scipy",
+    "pandas",
+    "matplotlib",
+    "numpy",
+]
+dev = [
+    "pytest",
+    "ruff",
+]
+
 [project.scripts]
-server = "server.app:main"
+server   = "server.app:main"
+train    = "train:main"
+evaluate = "scripts.evaluate:main"
 
 [tool.setuptools]
-packages = ["env", "graders", "tasks", "server"]
+packages = ["env", "graders", "tasks", "server", "training"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+

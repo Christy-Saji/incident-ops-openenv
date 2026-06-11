@@ -1,0 +1,75 @@
+# Incident Ops OpenEnv — Training Configuration
+# Edit this file to change training behaviour.
+# All values can also be overridden via environment variables (see training/config.py).
+
+experiment_name: "grpo_run_v1"
+seed: 42
+
+model:
+  # Model options for Colab T4 (16 GB VRAM) — sorted by quality:
+  #
+  #   unsloth/Qwen2.5-3B-Instruct     best choice — 2x better reasoning vs 1.5B,
+  #                                   ~60-75 min GRPO, safe on T4 with 8 gens  ← CURRENT
+  #
+  #   unsloth/Llama-3.2-3B-Instruct   good alternative if you prefer Meta/Llama
+  #                                   ~65-80 min, similar quality to Qwen 3B
+  #
+  #   unsloth/Qwen2.5-1.5B-Instruct   faster (~45 min) but weaker on hard/network tasks
+  #
+  #   unsloth/Qwen2.5-7B-Instruct     DO NOT use with num_generations=8 → OOM
+  #                                   only works with num_generations=4 + batch_size=1
+  id: "unsloth/Qwen2.5-3B-Instruct"
+  lora_rank: 32
+  lora_alpha: 16
+  max_seq_length: 1024
+  load_in_4bit: true
+
+  # Set push_to_hub: true and HF_TOKEN in Colab secrets to auto-upload after training
+  push_to_hub: false
+  hub_model_id: "chritsysajii/sre-agent-qwen25-3b-grpo"  # change to your HF username
+
+training:
+  # GRPO
+  grpo_max_steps: 300
+  per_task_prompts: 8
+  mid_episode_prompts: 60
+
+  # Hardware settings tuned for Colab T4 (16 GB VRAM)
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 4
+  num_generations: 8
+  max_prompt_length: 512
+  max_completion_length: 32
+
+  # Optimiser
+  learning_rate: 0.00001     # 1e-5
+  lr_scheduler_type: "cosine"
+  warmup_steps: 8
+  max_grad_norm: 0.3
+  temperature: 0.9
+
+  # SFT warm-start
+  sft_epochs: 1
+  sft_learning_rate: 0.0002  # 2e-4
+  sft_batch_size: 2
+  sft_gradient_accumulation: 4
+
+  # Checkpoint resumption — save every N steps so Colab disconnects don't lose progress
+  save_steps: 50
+  save_total_limit: 3
+
+output:
+  dir: "outputs"
+  grpo_dir: "outputs/grpo"
+  sft_dir: "outputs/sft"
+  reward_log: "outputs/reward_log.csv"
+  reward_curve: "outputs/reward_curve.png"
+  reward_components: "outputs/reward_components_mean.png"
+  model_path: "outputs/trained_sre_agent"
+
+wandb:
+  # Set enabled: true and add your W&B API key to Colab secrets as WANDB_API_KEY
+  enabled: false
+  project: "incident-ops-openenv"
+  entity: null        # your W&B username, or leave null for default
+  name: null          # run name — auto-generated if null
