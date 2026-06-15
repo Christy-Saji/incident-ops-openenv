@@ -117,10 +117,11 @@ def compute_breakdown(task_name: str, state: Dict) -> Dict[str, float]:
     # less at step 6 than step 2 — non-stationary reward for identical actions.
     # Now efficiency is 0 during the episode and credited only at resolution,
     # so the per-step score landscape is flat for all non-terminal actions.
+    # step_count is hoisted here so harm_rate below always has a valid reference.
+    step_count = state.get("step_count", 0)
     if not state["resolved"]:
         efficiency = 0.0
     else:
-        step_count = state.get("step_count", 0)
         efficiency = max(0.0, min(1.0, 1 - (step_count / max_steps)))
 
     # Harmful-action-rate penalty (ratio-based)
