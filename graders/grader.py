@@ -111,12 +111,17 @@ def compute_breakdown(task_name: str, state: Dict) -> Dict[str, float]:
     # Improved communication: richness-aware rather than raw count
     communication = _communication_score(state)
 
-    step_count = state.get("step_count", 0)
-    efficiency = max(0.0, min(1.0, 1 - (step_count / max_steps)))
-
-    # Halve efficiency if the incident was never resolved
+    # Terminal-only efficiency bonus.
+    # Previously efficiency decayed every step via 1-(step/max_steps), then
+    # was halved when unresolved. This made the same mitigation action worth
+    # less at step 6 than step 2 — non-stationary reward for identical actions.
+    # Now efficiency is 0 during the episode and credited only at resolution,
+    # so the per-step score landscape is flat for all non-terminal actions.
     if not state["resolved"]:
-        efficiency *= 0.5
+        efficiency = 0.0
+    else:
+        step_count = state.get("step_count", 0)
+        efficiency = max(0.0, min(1.0, 1 - (step_count / max_steps)))
 
     # Harmful-action-rate penalty (ratio-based)
     harm_rate = state.get("harmful_action_count", 0) / max(step_count, 1)

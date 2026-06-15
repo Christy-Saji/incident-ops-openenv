@@ -3,6 +3,10 @@
 Two public functions:
   generate_sft_dataset()  — optimal trajectory (state, action) pairs for SFT
   generate_grpo_dataset() — mixed initial + mid-episode prompts for GRPO
+
+Mid-episode states are now built from optimal-prefix warm-ups only.
+Random actions are never used, so every mid-episode prompt starts from
+a clean state with harmful_action_count == 0 and a recoverable trajectory.
 """
 
 from __future__ import annotations
@@ -142,18 +146,28 @@ def generate_grpo_dataset(
         for _ in range(per_task_n):
             data.append(_make_prompt(state))
 
-    # Mid-episode states — inject full action history for reward functions
+    # Mid-episode states — warm-up from optimal-prefix actions only.
+    # Using random.choice(VALID_ACTIONS) was discarded because it frequently
+    # triggers harmful actions (e.g. rollback_auth_deploy on "medium"), which
+    # sets harmful_action_count > 0 before the model acts and permanently
+    # suppresses the efficiency component of compute_score for that state.
+    # Optimal-prefix warm-up guarantees every mid-episode state is reachable,
+    # solvable, and starts with harmful_action_count == 0.
     for _ in range(mid_episode_n):
         task = random.choice(all_tasks)
-        n_warm = random.randint(1, 3)
+        cfg = TASK_CONFIGS[task]
+        optimal = cfg.get("optimal_actions", [])
+        # Take 1 to len(optimal)-1 steps so there is always at least one
+        # meaningful action left for the model to learn.
+        n_warm = random.randint(1, max(1, len(optimal) - 1))
         env = DevOpsEnv(task=task)
         state = env.reset()
-        for _ in range(n_warm):
-            action = random.choice(VALID_ACTIONS)
-            state, _, done, _ = env.step(action)
-            if done:
-                state = env.reset()
-                break
+        for i in range(n_warm):
+            if i < len(optimal):
+                state, _, done, _ = env.step(optimal[i])
+                if done:
+                    state = env.reset()
+                    break
         data.append(_make_prompt_with_history(state, env._state["actions_taken"]))
 
     random.shuffle(data)

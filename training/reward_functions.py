@@ -169,10 +169,17 @@ def anti_cheat_reward_func(prompts, completions, **kwargs) -> List[float]:
       1. Loop (last 3 all identical)            → -0.8
       2. Consecutive repeat (last action == now) → -0.7
       3. no_op                                  → -0.6
-      4. resolve_incident (usually premature)   → -0.3
-      5. acknowledge spam (2nd+ time)           → -0.6
-      6. Action already done somewhere          → -0.4
-      7. Novel action                           → +0.2
+      4. acknowledge spam (2nd+ time)           → -0.6
+      5. Action already done somewhere          → -0.4
+      6. Novel action                           → +0.2
+
+    NOTE: resolve_incident is intentionally NOT penalised here.
+    It is handled with full episode context (stable/unstable, mit_complete)
+    in terminal_outcome_reward_func, which gives +3.0 for a correct terminal
+    call and -1.5 for a premature one. A blanket penalty here would contradict
+    that signal and suppress the learning of the terminal action.
+    A second call to resolve_incident is still caught by case 5 above
+    (action in all_actions_taken → -0.4).
     """
     rewards = []
     for i, completion in enumerate(completions):
@@ -198,8 +205,6 @@ def anti_cheat_reward_func(prompts, completions, **kwargs) -> List[float]:
             rewards.append(-0.7)
         elif action in _NO_VALUE_ACTIONS:
             rewards.append(-0.6)
-        elif action == "resolve_incident":
-            rewards.append(-0.3)
         elif action in _FILLER_ACTIONS and all_actions_taken.count(action) >= 1:
             rewards.append(-0.6)
         elif action in all_actions_taken:
