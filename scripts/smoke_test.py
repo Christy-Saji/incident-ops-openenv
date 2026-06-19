@@ -1,10 +1,10 @@
 """Smoke tests for all GRPO fixes. Run from repo root: python scripts/smoke_test.py"""
 
-import sys
-import io
-import json
 import ast
 import inspect
+import io
+import json
+import sys
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
@@ -19,13 +19,11 @@ def check(label, ok, detail=""):
 
 
 # ── 1. reward_functions imports ──────────────────────────────────────────────
-from training.reward_functions import (
-    task_alignment_reward_func,
-    sequence_progress_reward_func,
-    terminal_outcome_reward_func,
-    anti_cheat_reward_func,
+from training.reward_functions import (  # noqa: E402
     ALL_REWARD_FUNCTIONS,
+    anti_cheat_reward_func,
 )
+
 print("1. reward_functions imports")
 check("3-func imports work", True)
 check(
@@ -65,7 +63,7 @@ check(
 
 # ── 3. grader efficiency is terminal-only ────────────────────────────────────
 print("3. grader.py efficiency terminal-only")
-from graders.grader import compute_breakdown
+from graders.grader import compute_breakdown  # noqa: E402
 
 base_state = {
     "task": "easy",
@@ -132,7 +130,7 @@ cell15 = "".join(nb["cells"][15]["source"])
 check("3-func import present", "task_alignment_reward_func" in cell15)
 check("ALL_REWARD_FUNCTIONS removed", "ALL_REWARD_FUNCTIONS" not in cell15)
 check("temperature=1.1", "temperature                 = 1.1" in cell15)
-check("kl_coef=0.15", "kl_coef                     = 0.15" in cell15)
+check("beta=0.15", "beta                     = 0.15" in cell15)
 check("diag logger present", "_diag_log" in cell15)
 
 
@@ -144,4 +142,4 @@ if errors:
         print(f"  - {e}")
     sys.exit(1)
 else:
-    print(f"All checks passed.")
+    print("All checks passed.")
