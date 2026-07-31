@@ -36,21 +36,7 @@ Training uses [Unsloth](https://github.com/unslothai/unsloth) + [TRL](https://gi
 
 ---
 
-## Results
 
-| Task | Base | Trained | Δ Delta | Resolved |
-|------|------|---------|---------|----------|
-| `easy` | 0.35 | 0.36 | +0.01 | ✓ |
-| `medium` | 0.06 | 0.34 | **+0.28** | ✓ |
-| `hard` | 0.15 | 0.27 | +0.12 | — |
-| `network` | 0.00 | 0.38 | **+0.38** | ✓ |
-| `memory_leak` | 0.00 | 0.38 | **+0.38** | ✓ |
-| `disk_full` | 0.14 | 0.36 | +0.22 | ✓ |
-| **average** | 0.12 | 0.35 | **+0.23** | 5/6 |
-
-Training reward curve and component analysis committed as artifacts: [`outputs/reward_curve.png`](outputs/reward_curve.png), [`outputs/reward_log.csv`](outputs/reward_log.csv).
-
----
 
 ## Project Structure
 
