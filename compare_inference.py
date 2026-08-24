@@ -11,50 +11,21 @@ Usage:
 """
 
 import argparse
-import json
 import os
-import re
 import sys
 import time
-from typing import Optional
 
 from env.environment import DevOpsEnv
 from env.models import VALID_ACTIONS
 from graders.grader import compute_score
 
-SYSTEM_PROMPT = (
-    "You are an On-call SRE resolving a live infrastructure incident. "
-    "Select the single NEXT best action to take.\n"
-    "Valid actions: {}\n\n"
-    "Rules:\n"
-    "1. NEVER repeat an action that already appears in 'actions_taken' or 'recent_actions'.\n"
-    "2. Follow the SRE workflow in order: DIAGNOSE first, then MITIGATE, then COMMUNICATE "
-    "(post_status_update), then RESOLVE.\n"
-    "3. Only call resolve_incident when all services are running and mitigations are done.\n"
-    "Output ONLY the action name. No explanation."
-).format(", ".join(VALID_ACTIONS))
+# Prompt construction and action parsing are shared with training and evaluation.
+# This file used to carry its own copy of both; they drifted from the training
+# versions, so the comparison scored the model on a prompt it was never trained on.
+from training.prompting import build_prompt
+from training.reward_functions import extract_action as _extract_action
 
 TASKS = ["easy", "medium", "hard", "network", "memory_leak", "disk_full"]
-
-
-def _extract_action(text: str) -> str | None:
-    """Extract the earliest valid action mention from model output."""
-    if not isinstance(text, str):
-        return None
-
-    cleaned = text.strip().lower().replace("`", " ").replace("\n", " ")
-    if cleaned in VALID_ACTIONS:
-        return cleaned
-
-    best_action = None
-    best_pos = None
-    for action in VALID_ACTIONS:
-        match = re.search(rf"\b{re.escape(action)}\b", cleaned)
-        if match:
-            if best_pos is None or match.start() < best_pos:
-                best_action = action
-                best_pos = match.start()
-    return best_action
 
 
 # ---------------------------------------------------------------------------
@@ -100,10 +71,7 @@ def _generate_action_hf_api(model_id: str, hf_token: str, state: dict) -> str:
 
     client = InferenceClient(model=model_id, token=hf_token)
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": json.dumps(state)},
-    ]
+    messages = build_prompt(state)
 
     # Retry up to 3 times for transient API errors
     for attempt in range(3):
@@ -136,17 +104,17 @@ def _generate_action(model, tokenizer, state: dict) -> str:
     """
     import torch
 
-    # Build a forbidden-actions hint from the live episode state
+    # Build a forbidden-actions hint from the live episode state.
+    # actions_taken now actually reaches here — the observation carries it
+    # (env/models.py), so this hint is no longer always empty.
     already_done: list = state.get("actions_taken", state.get("recent_actions", []))
     if already_done:
         forbidden_hint = f"\n\nFORBIDDEN (already used, do not repeat): {', '.join(already_done)}"
     else:
         forbidden_hint = ""
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": json.dumps(state) + forbidden_hint},
-    ]
+    messages = build_prompt(state)
+    messages[-1]["content"] += forbidden_hint
 
     text = tokenizer.apply_chat_template(
         messages,

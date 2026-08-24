@@ -52,10 +52,11 @@ incident-ops-openenv/
 ├── training/                 # Training package (extracted from monolithic train.py)
 │   ├── config.py             # TrainConfig dataclass + YAML loader
 │   ├── reward_functions.py   # All 9 GRPO reward signal functions
-│   ├── dataset.py            # SFT + GRPO curriculum dataset builders
+│   ├── dataset.py            # SFT + GRPO dataset builders, state enumeration
+│   ├── prompting.py          # SYSTEM_PROMPT + build_prompt (shared by train/eval/compare)
 │   ├── callbacks.py          # RewardLoggerCallback + WandbRewardCallback
-│   ├── plot.py               # Reward curve and component plotting
-│   └── pipeline.py           # SFT → GRPO training loop (~150 lines)
+│   ├── plot.py               # Reward curve (with reward_std collapse panel)
+│   └── pipeline.py           # SFT → GRPO training loop + prompt-budget guard
 │
 ├── env/
 │   ├── environment.py        # DevOpsEnv (gym-style: reset/step/state/score/episode)
@@ -74,14 +75,17 @@ incident-ops-openenv/
 │   └── index.html            # Interactive ops console UI (3 tabs: sim / results / lb)
 │
 ├── scripts/
-│   └── evaluate.py           # Multi-run eval: N seeds, mean±std, paired t-test
+│   ├── evaluate.py           # Multi-run eval: N seeds, mean±std, paired t-test
+│   └── smoke_test.py         # Quick end-to-end sanity check
 │
-├── tests/
+├── tests/                    # 70 tests, CPU-only, no model loading
 │   ├── conftest.py
-│   ├── test_reward_functions.py  # 67 tests, all reward funcs, CPU-only
-│   ├── test_environment.py       # All 6 tasks, reset/step/obs/optimal-trajectory
-│   └── test_grader.py            # Score ranges, component validation
+│   ├── test_reward_functions.py  # 35 tests — all 9 reward funcs
+│   ├── test_environment.py       # 19 tests — all 6 tasks, reset/step/obs/optimal
+│   ├── test_grader.py            # 13 tests — score ranges, component validation
+│   └── test_reward_ranking.py    #  3 tests — reward-vs-optimal tripwire (1 XFAIL)
 │
+├── .dockerignore
 └── .github/workflows/ci.yml  # Lint (ruff) + pytest + Docker smoke test
 ```
 
@@ -116,9 +120,15 @@ GRPO training uses 9 independent reward signals:
 | 6 | `progress_delta_reward` | Dense reward for measurable task progress |
 | 7 | `communication_gate_reward` | Gate comms until technical progress exists |
 | 8 | `terminal_outcome_reward` | Primary outcome signal (score delta + resolution) |
-| 9 | `diversity_reward` | Penalise GRPO group-level mode collapse |
+| 9 | `diversity_reward` | Penalise duplicate actions within a GRPO group |
 
-The environment scoring (`compute_score`) uses 5 weighted components: diagnosis quality, mitigation completion, recovery, communication, and efficiency.
+`diversity_reward` is scored **per completion** (each one penalised by how many
+siblings duplicate it), not per group. A reward that assigns the same value to
+every completion in a group is cancelled exactly by GRPO's group-mean baseline
+and cannot influence a single gradient — which is what the earlier group-uniform
+version did.
+
+The environment scoring (`compute_score`) uses 5 weighted components: diagnosis quality, mitigation completion, recovery, communication, and efficiency. See *Known Limitations* for how well this stack currently ranks the optimal action.
 
 ---
 
@@ -172,6 +182,14 @@ python scripts/evaluate.py \
 
 Output: `results/<label>_<timestamp>/report.md` with mean±std and p-values per task.
 
+Environment stochasticity is **on by default** (`--stochastic`), and LLM policies
+sample at `--temperature 0.7`. Both are required for the seeds to differ: with a
+deterministic environment and greedy decoding every seed yields an identical
+episode, and the report will mark those tasks `DEGENERATE` rather than print a
+p-value. Note that the heuristic baseline follows the optimal trajectory, so it
+is a strong reference, not an untrained one — for a base-vs-trained comparison
+pass `--base-model` pointing at the untrained checkpoint.
+
 ### Docker
 
 ```bash
@@ -187,12 +205,17 @@ Edit [`config/train.yaml`](config/train.yaml) to change any hyperparameter. Key 
 
 ```yaml
 model:
-  id: "unsloth/Qwen2.5-1.5B-Instruct"   # recommended for Colab T4
+  id: "unsloth/Qwen2.5-3B-Instruct"
   lora_rank: 32
+  lora_alpha: 64          # alpha = 2*rank; at 16 the LoRA update was scaled by 0.5
+  max_seq_length: 1280    # must fit max_prompt_length + max_completion_length
 
 training:
-  grpo_max_steps: 300
+  grpo_max_steps: 500
   num_generations: 8
+  max_prompt_length: 1024 # prompts are ~700 tok median; at 512 TRL left-truncated them
+  learning_rate: 0.00005  # 5e-5 — a LoRA LR, not a full-finetune one
+  kl_coef: 0.005          # KL vs the SFT reference; 0.04 anchored the policy in place
   save_steps: 50          # checkpoint every 50 steps (resume if Colab disconnects)
 
 wandb:
@@ -200,6 +223,10 @@ wandb:
 ```
 
 All values can also be overridden via environment variables (`GRPO_MAX_STEPS`, `HF_TOKEN`, etc.).
+
+`training/pipeline.py` asserts at startup that the longest training prompt fits
+inside `max_prompt_length` and raises if it does not — TRL left-truncates
+silently, which removes the system prompt and produces no warning in the logs.
 
 ---
 
@@ -221,6 +248,10 @@ All values can also be overridden via environment variables (`GRPO_MAX_STEPS`, `
 
 ## Hardware Notes
 
-- **Training:** Requires GPU. Tested on Colab T4 (16 GB VRAM), ~45–60 min for 300 GRPO steps with Llama 3.2-1B.
+- **Training:** Requires GPU. The committed config targets Colab T4 (16 GB VRAM)
+  with `Qwen2.5-3B-Instruct` in 4-bit at 500 GRPO steps. Wall-clock time for that
+  configuration has not been re-measured since the config changed — the previously
+  quoted figure was for a different model and step count and has been removed
+  rather than guessed at.
 - **Inference / eval / server:** CPU or any GPU. The 4-bit quantised model runs on 4 GB VRAM.
-- **Tests:** CPU only, no model loading required.
+- **Tests:** CPU only, no model loading required — `pytest tests/ -rxX`.

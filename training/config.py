@@ -30,8 +30,8 @@ class ModelConfig:
     """Model and LoRA configuration."""
     id: str = "unsloth/Llama-3.2-1B-Instruct"
     lora_rank: int = 32
-    lora_alpha: int = 16
-    max_seq_length: int = 512
+    lora_alpha: int = 64          # alpha = 2*rank convention
+    max_seq_length: int = 1280   # >= max_prompt_length + max_completion_length
     load_in_4bit: bool = True
 
     # For Colab runs: optionally push to HF Hub after training
@@ -50,10 +50,10 @@ class TrainingConfig:
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 8
     num_generations: int = 4            # number of GRPO rollouts per prompt
-    max_prompt_length: int = 512
+    max_prompt_length: int = 1024  # below ~900 TRL left-truncates real prompts
     max_completion_length: int = 32
-    learning_rate: float = 1e-5
-    kl_coef: float = 0.04          # KL penalty — passed as `beta` to GRPOConfig (TRL renamed kl_coef → beta)
+    learning_rate: float = 5e-5    # LoRA LR (1e-5 is a full-finetune LR)
+    kl_coef: float = 0.005         # KL penalty — passed as `beta` to GRPOConfig (TRL renamed kl_coef → beta)
     lr_scheduler_type: str = "cosine"
     warmup_steps: int = 8
     max_grad_norm: float = 0.3
@@ -129,7 +129,10 @@ class TrainConfig:
         if not _YAML_AVAILABLE:
             raise ImportError("PyYAML is required: pip install pyyaml")
 
-        with open(path) as f:
+        # encoding is explicit: config/train.yaml contains non-ASCII characters in
+        # its comments, and Python defaults to the locale encoding (cp1252 on
+        # Windows), which raises UnicodeDecodeError. Only ever worked on Linux.
+        with open(path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
 
         cfg = cls(

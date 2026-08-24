@@ -5,6 +5,12 @@ import inspect
 import io
 import json
 import sys
+from pathlib import Path
+
+# Running `python scripts/smoke_test.py` puts scripts/ on sys.path, not the repo
+# root, so the project packages are not importable without this. Same bootstrap
+# as scripts/evaluate.py.
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
@@ -127,7 +133,10 @@ with open("colab_training.ipynb", "r", encoding="utf-8") as f:
     nb = json.load(f)
 
 cell15 = "".join(nb["cells"][15]["source"])
-check("3-func import present", "task_alignment_reward_func" in cell15)
+# The 3-function subset is now named in training/reward_functions.py rather than
+# spelled out inline, so the notebook and the tests share one definition.
+check("CORE_REWARD_FUNCTIONS import present", "CORE_REWARD_FUNCTIONS" in cell15)
+check("prompt-budget guard present", "Prompt budget exceeded" in cell15)
 check("ALL_REWARD_FUNCTIONS removed", "ALL_REWARD_FUNCTIONS" not in cell15)
 check("temperature=1.1", "temperature                 = 1.1" in cell15)
 check("beta=0.15", "beta                     = 0.15" in cell15)

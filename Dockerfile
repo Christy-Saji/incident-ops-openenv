@@ -3,8 +3,10 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY . .
 
-# Only install server-side deps (no torch/unsloth — those run in Colab)
-RUN pip install --no-cache-dir -r requirements.txt
+# Server-side deps only (no torch/unsloth — training runs on Colab / AMD cloud).
+# The base [project] dependencies in pyproject.toml are exactly the server set:
+# fastapi, openai, pydantic, pyyaml, uvicorn.
+RUN pip install --no-cache-dir .
 
 EXPOSE 7860
 

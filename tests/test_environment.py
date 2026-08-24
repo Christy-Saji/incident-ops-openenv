@@ -1,8 +1,8 @@
 """Unit tests for the DevOpsEnv environment."""
 
 import pytest
+
 from env.environment import DevOpsEnv
-from env.models import VALID_ACTIONS
 from tasks.task_config import TASK_CONFIGS
 
 

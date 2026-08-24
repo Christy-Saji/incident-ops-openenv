@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from typing import List
 
 from env.environment import DevOpsEnv
 from env.models import VALID_ACTIONS
 from graders.grader import compute_score
 from tasks.task_config import TASK_CONFIGS
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -487,21 +487,48 @@ def terminal_outcome_reward_func(prompts, completions, **kwargs) -> List[float]:
 def diversity_reward_func(prompts, completions, **kwargs) -> List[float]:
     """Reward 9: Penalise GRPO group-level mode collapse.
 
-    GRPO samples num_generations completions per prompt. When all completions
-    are identical the reward_std is 0 — there is no gradient signal and the
-    model stops learning. This reward detects that collapse at the batch level
-    and applies a uniform negative signal so the KL term forces exploration.
-    Returns 0.0 when the group shows healthy diversity.
-    """
-    actions = [extract_action(c[0]["content"] or "") or "" for c in completions]
-    valid_actions = [a for a in actions if a in VALID_ACTIONS]
-    unique_count = len(set(valid_actions)) if valid_actions else 0
+    IMPORTANT — why this is per-completion and must stay that way:
 
-    if unique_count <= 1:
-        return [-0.5] * len(completions)
-    elif unique_count == 2:
-        return [-0.1] * len(completions)
-    return [0.0] * len(completions)
+    GRPO computes the advantage as (r_i - group_mean) / group_std. Any reward
+    that assigns the *same* value to every completion in a group shifts the mean
+    by exactly that value and therefore contributes exactly ZERO to every
+    advantage. It is invisible to the optimiser.
+
+    The previous version returned a single uniform value for the whole group
+    (-0.5 on collapse, 0.0 otherwise), so despite being the designated
+    anti-collapse mechanism it could never influence a single gradient. Its only
+    observable effect was to make the logged mean reward dip on collapse, which
+    made the reward curve *look* responsive while nothing was happening.
+
+    The fix: penalise each completion by how many siblings duplicate it. A
+    completion echoing the majority action is now scored below a minority one,
+    so the value varies within the group and survives the group-mean baseline.
+
+        reward_i = -0.5 * (count(action_i) - 1) / (group_size - 1)
+
+    Range [-0.5, 0.0]: 0.0 when an action is unique in the group, -0.5 when
+    every completion in the group emitted it.
+
+    Total collapse (all completions identical) still yields a uniform value and
+    therefore zero advantage. That is correct and unavoidable — when every
+    sample is the same there is genuinely no signal to learn from. Detecting it
+    is the job of the reward_std column logged by RewardLoggerCallback, not of
+    this function.
+    """
+    actions = [
+        extract_action(c[0]["content"] or "") or "<invalid>" for c in completions
+    ]
+    counts = Counter(actions)
+    group_size = len(actions)
+    if group_size <= 1:
+        return [0.0] * group_size
+
+    # + 0.0 normalises the -0.0 that float negation produces for unique actions,
+    # so the logged CSV column reads 0.0 rather than -0.0.
+    return [
+        round(-0.5 * (counts[action] - 1) / (group_size - 1), 4) + 0.0
+        for action in actions
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -518,4 +545,24 @@ ALL_REWARD_FUNCTIONS = [
     communication_gate_reward_func,
     terminal_outcome_reward_func,
     diversity_reward_func,
+]
+
+
+# The reduced, less-overlapping subset used by colab_training.ipynb.
+#
+# Functions 2, 4, 5, 6, 7 and 8 all compute a variant of "is this action a
+# required diagnostic/mitigation that has not been taken yet", so summing all
+# nine is closer to one signal counted six times than to nine signals. This
+# subset keeps the three least-redundant ones:
+#   task_alignment    — is the action correct for this specific task
+#   sequence_progress — diagnose -> mitigate -> communicate -> resolve ordering
+#   terminal_outcome  — episodic outcome (score delta + resolution)
+#
+# Defined here rather than inline in the notebook so the notebook, the pipeline
+# and tests/test_reward_ranking.py cannot drift apart. Both stacks are measured
+# by that test.
+CORE_REWARD_FUNCTIONS = [
+    task_alignment_reward_func,
+    sequence_progress_reward_func,
+    terminal_outcome_reward_func,
 ]

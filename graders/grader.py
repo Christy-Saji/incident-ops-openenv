@@ -4,7 +4,6 @@ from typing import Dict, Tuple
 
 from tasks.task_config import TASK_CONFIGS
 
-
 TASK_WEIGHTS = {
     "easy": {
         "diagnosis": 0.20,
@@ -100,7 +99,12 @@ def compute_breakdown(task_name: str, state: Dict) -> Dict[str, float]:
     mitigation_done = sum(
         1 for action in config["required_mitigations"] if action in actions_taken
     )
-    good_followups_done = sum(
+    # NOTE: computed but deliberately not consumed by the weighted score below.
+    # config["good_followups"] therefore has no effect on compute_score today —
+    # follow-up quality reaches the score only indirectly, via _communication_score.
+    # Left as-is on purpose: changing it would alter every published score.
+    # Revisit alongside the Tier-1 reward redesign.
+    _good_followups_done = sum(
         1 for action in config["good_followups"] if action in actions_taken
     )
 

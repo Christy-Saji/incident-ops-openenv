@@ -10,10 +10,20 @@ def plot_reward_curve(
     out_path: str,
     smooth_window: int = 10,
 ) -> None:
-    """Single-panel reward curve: raw (faint), smoothed (bold), linear trend (dashed)."""
+    """Two-panel training diagnostic.
+
+    Top:    reward — raw (faint), smoothed (bold), linear trend (dashed).
+    Bottom: reward_std — the mode-collapse alarm.
+
+    Read the bottom panel first. GRPO's advantage is (r - group_mean) / group_std,
+    so reward_std ~ 0 means every completion in the group was identical, every
+    advantage was 0, and no gradient flowed regardless of what the top panel
+    shows. A flat top panel with a healthy reward_std is a reward-design problem;
+    a flat top panel with reward_std at 0 is mode collapse.
+    """
+    import matplotlib
     import numpy as np
     import pandas as pd
-    import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -39,8 +49,20 @@ def plot_reward_curve(
 
     BASE_BLUE  = "#4C72B0"
     LIGHT_BLUE = "#A8C4E0"
+    ALARM_RED  = "#C44E52"
 
-    fig, ax = plt.subplots(figsize=(12, 5), facecolor="white")
+    has_std = "reward_std" in df.columns and df["reward_std"].notna().any()
+
+    fig, axes = plt.subplots(
+        2 if has_std else 1, 1,
+        figsize=(12, 7.5 if has_std else 5),
+        facecolor="white",
+        sharex=True,
+        gridspec_kw={"height_ratios": [2, 1]} if has_std else None,
+    )
+    axes = axes if has_std else [axes]
+    ax = axes[0]
+
     fig.suptitle(
         "GRPO Training — DevOps Incident Triage SRE Agent\n"
         "SFT warm-start + GRPO (9 reward signals)",
@@ -56,11 +78,37 @@ def plot_reward_curve(
 
     ax.axhline(0, color="#cccccc", linewidth=0.6, linestyle=":")
     ax.set_title("Overall Reward", fontsize=10, pad=6)
-    ax.set_xlabel("Training Step", fontsize=9)
     ax.set_ylabel("Reward", fontsize=9)
     ax.legend(fontsize=8, loc="upper left", framealpha=0.8)
     ax.grid(True, alpha=0.3)
     ax.tick_params(labelsize=8)
+
+    if has_std:
+        ax_std = axes[1]
+        std_vals = df["reward_std"].values
+        ax_std.plot(steps, std_vals, color=ALARM_RED, linewidth=1.6,
+                    label="reward_std (within-group)")
+        ax_std.axhline(0, color=ALARM_RED, linewidth=1.0, linestyle="--", alpha=0.8)
+        ax_std.fill_between(steps, 0, std_vals, color=ALARM_RED, alpha=0.15)
+
+        ax_std.annotate(
+            "mode collapse — no gradient",
+            xy=(steps[0] if len(steps) else 0, 0),
+            xytext=(4, 6), textcoords="offset points",
+            fontsize=8, color=ALARM_RED, fontweight="bold", va="bottom",
+        )
+        ax_std.set_title(
+            "Within-Group Reward Std — advantage is (r - mean) / std, "
+            "so std ~ 0 means zero gradient",
+            fontsize=9, pad=6,
+        )
+        ax_std.set_ylabel("reward_std", fontsize=9)
+        ax_std.legend(fontsize=8, loc="upper right", framealpha=0.8)
+        ax_std.grid(True, alpha=0.3)
+        ax_std.tick_params(labelsize=8)
+        ax_std.set_ylim(bottom=0)
+
+    axes[-1].set_xlabel("Training Step", fontsize=9)
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -73,8 +121,8 @@ def plot_reward_components(
     out_path: str,
 ) -> None:
     """Bar chart of mean reward per reward function across all training steps."""
-    import pandas as pd
     import matplotlib
+    import pandas as pd
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -97,7 +145,7 @@ def plot_reward_components(
     ]
 
     fig, ax = plt.subplots(figsize=(10, 5), facecolor="white")
-    bars = ax.barh(labels, means.values, color=colors, edgecolor="white", linewidth=0.5)
+    ax.barh(labels, means.values, color=colors, edgecolor="white", linewidth=0.5)
     ax.axvline(0, color="#333333", linewidth=0.8, linestyle="-")
     ax.set_xlabel("Mean Reward Contribution", fontsize=9)
     ax.set_title("Reward Component Contributions (mean across all steps)", fontsize=10, fontweight="bold")

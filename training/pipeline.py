@@ -24,12 +24,12 @@ def run(config: "TrainConfig") -> None:
     training package can be imported on CPU-only machines (e.g. for tests).
     """
     import torch
+    from trl import GRPOConfig, GRPOTrainer, SFTConfig, SFTTrainer
     from unsloth import FastLanguageModel, PatchDPOTrainer
-    from trl import GRPOTrainer, GRPOConfig, SFTTrainer, SFTConfig
 
     from training.callbacks import RewardLoggerCallback, WandbRewardCallback
-    from training.dataset import generate_sft_dataset, generate_grpo_dataset
-    from training.plot import plot_reward_curve, plot_reward_components
+    from training.dataset import generate_grpo_dataset, generate_sft_dataset
+    from training.plot import plot_reward_components, plot_reward_curve
     from training.reward_functions import ALL_REWARD_FUNCTIONS
 
     # ------------------------------------------------------------------
@@ -124,6 +124,14 @@ def run(config: "TrainConfig") -> None:
         per_task_n=config.training.per_task_prompts,
         mid_episode_n=config.training.mid_episode_prompts,
         seed=config.seed,
+    )
+
+    _assert_prompts_fit(
+        grpo_dataset,
+        tokenizer,
+        config.training.max_prompt_length,
+        config.model.max_seq_length,
+        config.training.max_completion_length,
     )
 
     grpo_args = GRPOConfig(
@@ -224,6 +232,56 @@ def run(config: "TrainConfig") -> None:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _assert_prompts_fit(
+    dataset,
+    tokenizer,
+    max_prompt_length: int,
+    max_seq_length: int,
+    max_completion_length: int,
+) -> None:
+    """Fail loudly if any training prompt would be silently truncated.
+
+    TRL left-truncates prompts longer than max_prompt_length, which removes the
+    system prompt (rules + action list) and the head of the observation JSON.
+    That happened silently for the whole of the first training run: prompts were
+    a median ~700 tokens against a 512-token limit, so GRPO was sampling from a
+    truncated JSON fragment with no instructions in it, while SFT had trained on
+    the full prompt. Nothing in the logs said so.
+
+    Raising here is the guard that stops that from ever recurring.
+    """
+    longest_tokens = 0
+    longest_text = ""
+    for row in dataset:
+        text = tokenizer.apply_chat_template(
+            row["prompt"], tokenize=False, add_generation_prompt=True
+        )
+        n_tokens = len(tokenizer(text)["input_ids"])
+        if n_tokens > longest_tokens:
+            longest_tokens, longest_text = n_tokens, text
+
+    print(f"  [prompt-budget] longest prompt: {longest_tokens} tokens "
+          f"(max_prompt_length={max_prompt_length})")
+
+    if longest_tokens > max_prompt_length:
+        raise ValueError(
+            f"Prompt budget exceeded: longest training prompt is {longest_tokens} tokens "
+            f"but max_prompt_length is {max_prompt_length}. TRL would LEFT-truncate this, "
+            f"silently removing the system prompt and the start of the observation.\n"
+            f"Fix by raising training.max_prompt_length in config/train.yaml (and "
+            f"model.max_seq_length with it), or by trimming the observation in "
+            f"training/prompting.py:PROMPT_EXCLUDED_OBS_KEYS.\n"
+            f"Longest prompt began: {longest_text[:200]!r}"
+        )
+
+    if max_prompt_length + max_completion_length > max_seq_length:
+        raise ValueError(
+            f"max_prompt_length ({max_prompt_length}) + max_completion_length "
+            f"({max_completion_length}) = {max_prompt_length + max_completion_length} "
+            f"exceeds model.max_seq_length ({max_seq_length})."
+        )
+
 
 def _find_latest_checkpoint(output_dir: str) -> str | None:
     """Find the most recent checkpoint directory, if any."""
