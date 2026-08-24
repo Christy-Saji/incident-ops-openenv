@@ -1,21 +1,19 @@
 """FastAPI server — session-isolated with /episode, /demo, /leaderboard, partial obs."""
 
+import pathlib
 import uuid
-import copy
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from env.environment import DevOpsEnv
-from env.models import Action, VALID_ACTIONS
+from env.models import Action
 from graders.grader import compute_score
-from inference import create_openai_client_from_env, run_episode as run_policy_episode
+from server.inference import create_openai_client_from_env
+from server.inference import run_episode as run_policy_episode
 from tasks.task_config import TASK_CONFIGS
-
-import os, pathlib
 
 app = FastAPI(
     title="DevOps Incident Triage OpenEnv",

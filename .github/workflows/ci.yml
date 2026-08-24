@@ -24,20 +24,26 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest ruff
+          pip install -e ".[dev,eval]"
 
       - name: Lint with ruff
         run: ruff check . --select=E,F,W,I --ignore=E501
 
       - name: Run environment + grader tests (CPU only, no GPU needed)
         run: |
-          pytest tests/test_environment.py tests/test_grader.py -v --tb=short
+          pytest tests/test_environment.py tests/test_grader.py -v --tb=short -rxX
 
       - name: Run reward function tests (CPU-safe subset)
         run: |
-          pytest tests/test_reward_functions.py -v --tb=short \
+          pytest tests/test_reward_functions.py -v --tb=short -rxX \
             -k "TestExtractAction or TestFormatReward or TestAntiCheatReward or TestDiversityReward or TestBatchConsistency"
+
+      # Tier-1 tripwire: reports how many training states the reward stack ranks
+      # correctly. Expected to XFAIL until the reward functions are redesigned —
+      # -rxX prints the live N/33 count in the summary on every run.
+      - name: Reward ranking sanity check (expected XFAIL until Tier 1)
+        run: |
+          pytest tests/test_reward_ranking.py -v --tb=short -rxX
 
   docker:
     name: Docker Build + Smoke Test

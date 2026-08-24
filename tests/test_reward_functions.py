@@ -7,24 +7,19 @@ These tests run entirely on CPU — no GPU or model loading required.
 """
 
 import json
+
 import pytest
 
 from env.environment import DevOpsEnv
-from env.models import VALID_ACTIONS
-from tasks.task_config import TASK_CONFIGS
 
 # All reward functions
 from training.reward_functions import (
+    anti_cheat_reward_func,
+    diversity_reward_func,
     extract_action,
     format_reward_func,
-    step_reward_func,
-    anti_cheat_reward_func,
-    task_alignment_reward_func,
     sequence_progress_reward_func,
-    progress_delta_reward_func,
-    communication_gate_reward_func,
-    terminal_outcome_reward_func,
-    diversity_reward_func,
+    task_alignment_reward_func,
 )
 
 # ---------------------------------------------------------------------------

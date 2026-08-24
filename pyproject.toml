@@ -52,6 +52,11 @@ python_files = ["test_*.py"]
 
 [tool.ruff]
 line-length = 100
+# Notebooks legitimately interleave imports with code; linting them as modules
+# produces only E402/E701 noise.
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
 

@@ -4,7 +4,6 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-
 VALID_ACTIONS = [
     # ── Universal ──────────────────────────────────────────────────────────
     "acknowledge_incident",
@@ -53,6 +52,17 @@ class Observation(BaseModel):
     communication_log: List[str]
     recent_actions: List[str]
     available_actions: List[str]
+    # Full episode action history.
+    #
+    # recent_actions is only the last 5 actions. Several consumers need the
+    # complete history and previously read a key that the observation never
+    # carried, silently getting []:
+    #   - scripts/evaluate.py heuristic_policy  (looped acknowledge_incident
+    #     forever, which made the eval "baseline" a degenerate policy)
+    #   - compare_inference.py forbidden-actions hint (never populated)
+    #   - training reward functions replaying episode state from the prompt
+    # Exposing it here is what makes all three correct.
+    actions_taken: List[str] = Field(default_factory=list)
     # Partial-observability flag — set to True on hard mode
     partial_observability: bool = False
 

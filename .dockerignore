@@ -1,0 +1,35 @@
+# Virtualenvs — never bake a host venv into the image
+.venv/
+venv/
+devopsenv/
+env.bak/
+
+# VCS + CI
+.git/
+.github/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Training artefacts and notebooks (not needed by the server)
+colab_training.ipynb
+outputs/
+outputs_grpo/
+outputs_sft/
+outputs_sanity/
+trained_sre_agent/
+results/
+*.safetensors
+*.bin
+*.pkl
+
+# Local env / editor
+.env
+.DS_Store
+dist/
+build/

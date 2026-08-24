@@ -4,7 +4,7 @@ import copy
 import random
 from typing import Dict, List, Tuple
 
-from env.models import Action, Observation, VALID_ACTIONS
+from env.models import VALID_ACTIONS, Action, Observation
 from graders.grader import compute_score
 from tasks.task_config import TASK_CONFIGS
 
@@ -158,6 +158,7 @@ class DevOpsEnv:
             communication_log=self._state["communication_log"],
             recent_actions=self._state["recent_actions"],
             available_actions=VALID_ACTIONS,
+            actions_taken=list(self._state["actions_taken"]),
             partial_observability=self.partial_obs,
         )
         return observation.model_dump()

@@ -31,45 +31,38 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import random
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from env.environment import DevOpsEnv
+from env.policies import heuristic_policy
 from graders.grader import compute_score
 from tasks.task_config import TASK_CONFIGS
-
+from training.prompting import build_prompt
 
 # ---------------------------------------------------------------------------
 # Policies
 # ---------------------------------------------------------------------------
-
-def heuristic_policy(task: str, state: dict) -> str:
-    """Deterministic optimal policy — follows task_config optimal_actions list."""
-    from env.models import VALID_ACTIONS
-
-    config = TASK_CONFIGS.get(task, TASK_CONFIGS["easy"])
-    optimal = config.get("optimal_actions", [])
-    done_actions = set(state.get("actions_taken", []))
-
-    for action in optimal:
-        if action not in done_actions:
-            return action
-
-    # Fallback: resolve if all done, else no_op
-    if "resolve_incident" not in done_actions:
-        return "resolve_incident"
-    return "no_op"
+# heuristic_policy lives in env/policies.py so the evaluation script and the
+# server's /demo endpoint share one implementation.
 
 
-def llm_policy(model_path: str, state: dict) -> str:
-    """Run inference against a local saved model."""
+def llm_policy(model_path: str, state: dict, temperature: float = 0.7) -> str:
+    """Run inference against a local saved model.
+
+    Uses training/prompting.build_prompt so the evaluated prompt is byte-identical
+    to the trained one. This function previously built its own shortened 3-line
+    system prompt, so the model was scored on an input distribution it had never
+    been trained on.
+
+    Sampling (do_sample=True) rather than greedy decoding is deliberate — see
+    run_episode for why the evaluation needs a real source of variance.
+    """
     try:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -86,28 +79,22 @@ def llm_policy(model_path: str, state: dict) -> str:
             llm_policy._model = mdl
 
         from env.models import VALID_ACTIONS
-        import json as _json
 
-        system = (
-            "You are an On-call SRE. Select the single NEXT best action.\n"
-            f"Valid actions: {', '.join(VALID_ACTIONS)}\n"
-            "Output ONLY the action name."
-        )
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user",   "content": _json.dumps(state)},
-        ]
         tok = llm_policy._tokenizer
         mdl = llm_policy._model
-        text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        text = tok.apply_chat_template(
+            build_prompt(state), tokenize=False, add_generation_prompt=True
+        )
         inputs = tok(text, return_tensors="pt").to(mdl.device)
 
         with torch.no_grad():
             out = mdl.generate(
                 **inputs,
                 max_new_tokens=12,
-                do_sample=False,
-                temperature=1.0,
+                do_sample=True,
+                temperature=temperature,
+                top_p=0.9,
+                pad_token_id=tok.eos_token_id,
             )
         decoded = tok.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip().lower()
 
@@ -125,10 +112,30 @@ def llm_policy(model_path: str, state: dict) -> str:
 # Episode runner
 # ---------------------------------------------------------------------------
 
-def run_episode(task: str, policy_fn, seed: int, partial_obs: bool = False) -> dict:
-    """Run a single episode and return stats."""
+def run_episode(
+    task: str,
+    policy_fn,
+    seed: int,
+    partial_obs: bool = False,
+    stochastic: bool = True,
+) -> dict:
+    """Run a single episode and return stats.
+
+    stochastic=True switches on the env's +/-5% metric jitter (DevOpsEnv._apply_noise).
+    Without it the environment is fully deterministic, and combined with greedy
+    decoding every seed produced a byte-identical episode: std was 0.0 for every
+    task and the paired t-test compared a list against an identical copy of
+    itself. The flag had existed in the env since the start and was simply never
+    switched on by this script.
+    """
     random.seed(seed)
-    env = DevOpsEnv(task=task, partial_obs=partial_obs)
+    try:
+        import torch
+        torch.manual_seed(seed)
+    except ImportError:
+        pass  # heuristic policy needs no torch
+
+    env = DevOpsEnv(task=task, partial_obs=partial_obs, stochastic=stochastic)
     state = env.reset()
 
     total_reward = 0.0
@@ -172,32 +179,47 @@ def mean_std(values: list[float]) -> tuple[float, float]:
 
 
 def paired_ttest_pvalue(a: list[float], b: list[float]) -> float:
-    """Simple paired t-test p-value (two-tailed). Returns 1.0 if not enough data."""
+    """Simple paired t-test p-value (two-tailed). Returns 1.0 if not enough data.
+
+    Zero within-pair variance returns 1.0, not 0.0. The previous version returned
+    0.0 whenever sd == 0 and md != 0 — i.e. it reported "p = 0.0, significant" for
+    exactly the degenerate case where every seed gave an identical result and the
+    test carries no information at all. Combined with the deterministic env that
+    was every row of the results table.
+    """
+    import math
+
     if len(a) != len(b) or len(a) < 2:
         return 1.0
+
+    diffs = [b[i] - a[i] for i in range(len(a))]
+    n  = len(diffs)
+    md = sum(diffs) / n
+    sd = (sum((d - md) ** 2 for d in diffs) / (n - 1)) ** 0.5
+    if sd == 0:
+        # Degenerate: no variance to test against. make_report() flags this.
+        return 1.0
+
     try:
         from scipy import stats
         _, p = stats.ttest_rel(b, a)
-        return round(float(p), 4)
+        p = float(p)
+        return 1.0 if math.isnan(p) else round(p, 4)
     except ImportError:
-        # Manual t-test
-        import math
-        diffs = [b[i] - a[i] for i in range(len(a))]
-        n  = len(diffs)
-        md = sum(diffs) / n
-        sd = (sum((d - md) ** 2 for d in diffs) / (n - 1)) ** 0.5
-        if sd == 0:
-            return 0.0 if md != 0 else 1.0
+        # Manual t-test — rough p-value approximation for small n (conservative)
         t  = md / (sd / (n ** 0.5))
-        # rough p-value approximation for small n (conservative)
         df = n - 1
         p  = 2 * (1 - _t_cdf(abs(t), df))
         return round(p, 4)
 
 
+def is_degenerate(base: list[float], trained: list[float]) -> bool:
+    """True when a task's seeds carry no variance, making its p-value meaningless."""
+    return len(set(base)) <= 1 and len(set(trained)) <= 1
+
+
 def _t_cdf(t: float, df: int) -> float:
     """Approximated CDF for t-distribution (good enough for p-value reporting)."""
-    import math
     x = df / (df + t * t)
     # regularized incomplete beta
     a, b = df / 2, 0.5
@@ -221,40 +243,70 @@ def _t_cdf(t: float, df: int) -> float:
 def make_report(summary: dict, label: str, n_seeds: int, args) -> str:
     lines = [
         f"# Evaluation Report — {label}",
-        f"",
+        "",
         f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}  ",
         f"**Seeds:** {n_seeds}  ",
         f"**Base policy:** {'heuristic' if not args.base_model else args.base_model}  ",
         f"**Trained policy:** {'heuristic (no model)' if not args.trained_model else args.trained_model}  ",
-        f"",
-        f"## Per-Task Results",
-        f"",
-        f"| Task | Base (mean±std) | Trained (mean±std) | Δ | p-value | Significant? |",
-        f"|------|-----------------|--------------------|---|---------|--------------|",
+        "",
+        "## Per-Task Results",
+        "",
+        "| Task | Base (mean±std) | Trained (mean±std) | Δ | p-value | Significant? |",
+        "|------|-----------------|--------------------|---|---------|--------------|",
     ]
 
+    degenerate_tasks = []
     for task, stats in summary.items():
         b_m, b_s = stats["base_mean"], stats["base_std"]
         t_m, t_s = stats["trained_mean"], stats["trained_std"]
         delta    = stats["delta"]
         p        = stats["p_value"]
-        sign     = "(*)" if p < 0.05 else "   "
         d_str    = f"+{delta:.3f}" if delta >= 0 else f"{delta:.3f}"
+
+        if stats.get("degenerate"):
+            degenerate_tasks.append(task)
+            p_str, sign = "n/a", "DEGENERATE"
+        else:
+            p_str = f"{p:.3f}"
+            sign  = "(*)" if p < 0.05 else "   "
+
         lines.append(
             f"| `{task}` | {b_m:.3f}+/-{b_s:.3f} | {t_m:.3f}+/-{t_s:.3f} "
-            f"| **{d_str}** | {p:.3f} | {sign} |"
+            f"| **{d_str}** | {p_str} | {sign} |"
         )
 
     all_deltas = [s["delta"] for s in summary.values()]
     avg_delta  = sum(all_deltas) / len(all_deltas) if all_deltas else 0
     lines += [
-        f"",
+        "",
         f"**Average delta:** {avg_delta:+.3f}",
-        f"",
-        f"## Notes",
-        f"- p < 0.05 indicates statistically significant improvement",
-        f"- All scores are in [0, 1]; multiply by 100 for percentage",
-        f"- 'Significant?' uses a paired t-test (two-tailed, a=0.05)",
+        "",
+    ]
+
+    if degenerate_tasks:
+        lines += [
+            f"> **WARNING — zero variance across seeds:** "
+            f"`{'`, `'.join(degenerate_tasks)}`",
+            ">",
+            "> Every seed produced an identical episode for these tasks, so the",
+            "> p-values are not meaningful and are reported as `n/a`. Running N",
+            "> seeds over a deterministic setup measures the same episode N times;",
+            "> it does not make the result statistically significant.",
+            ">",
+            "> Fix: run with `--stochastic` (default) so the environment applies",
+            "> metric jitter, and use a sampling policy (`--temperature > 0`).",
+            "> A heuristic policy is deterministic by construction and will always",
+            "> show zero variance on the action sequence itself.",
+            "",
+        ]
+
+    lines += [
+        "## Notes",
+        "- p < 0.05 indicates statistically significant improvement",
+        "- All scores are in [0, 1]; multiply by 100 for percentage",
+        "- 'Significant?' uses a paired t-test (two-tailed, a=0.05)",
+        f"- Environment stochasticity: {'ON' if getattr(args, 'stochastic', True) else 'OFF'}"
+        f"; sampling temperature: {getattr(args, 'temperature', 0.7)}",
     ]
 
     return "\n".join(lines)
@@ -286,6 +338,14 @@ def main() -> None:
                         help="Train tasks (for labelling only, not used during eval)")
     parser.add_argument("--partial-obs", action="store_true",
                         help="Enable partial observability mode")
+    parser.add_argument("--stochastic", action=argparse.BooleanOptionalAction, default=True,
+                        help="Apply the environment's +/-5%% metric jitter (default: on). "
+                             "With --no-stochastic the env is deterministic and, combined "
+                             "with a deterministic policy, every seed yields an identical "
+                             "episode — making the p-values meaningless.")
+    parser.add_argument("--temperature", type=float, default=0.7,
+                        help="Sampling temperature for LLM policies (default: 0.7). "
+                             "0 means greedy, which removes policy-side variance.")
     parser.add_argument("--output-dir", default="results",
                         help="Directory for output files (default: results/)")
     parser.add_argument("--label",  default="eval",
@@ -305,23 +365,30 @@ def main() -> None:
 
     # Build policy functions
     if args.base_model:
-        base_fn = lambda task, state: llm_policy(args.base_model, state)
+        base_path = args.base_model
+        def base_fn(task, state): return llm_policy(base_path, state, args.temperature)
     else:
         base_fn = heuristic_policy
 
     if args.trained_model:
         # Use a separate llm_policy instance for trained model
         trained_path = args.trained_model
-        def trained_fn(task, state): return llm_policy(trained_path, state)
+        def trained_fn(task, state): return llm_policy(trained_path, state, args.temperature)
     else:
         trained_fn = heuristic_policy
 
-    print(f"\n" + "-" * 60)
+    print("\n" + "-" * 60)
     print(f"  Evaluation Run: {args.label}")
     print(f"  Tasks  : {tasks}")
     print(f"  Seeds  : {seeds}")
+    print(f"  Stochastic env : {args.stochastic}")
+    print(f"  Temperature    : {args.temperature}")
     print(f"  Output : {run_dir}")
     print("-" * 60)
+
+    if not args.stochastic and not (args.base_model or args.trained_model):
+        print("  NOTE: deterministic env + heuristic policies — all seeds will be")
+        print("        identical and p-values will be reported as n/a.")
 
     all_rows: list[dict] = []
     summary: dict = {}
@@ -333,8 +400,10 @@ def main() -> None:
         for seed in seeds:
             print(f"    seed={seed}  ", end="", flush=True)
 
-            b = run_episode(task, base_fn,    seed, partial_obs=args.partial_obs)
-            t = run_episode(task, trained_fn, seed, partial_obs=args.partial_obs)
+            b = run_episode(task, base_fn,    seed,
+                            partial_obs=args.partial_obs, stochastic=args.stochastic)
+            t = run_episode(task, trained_fn, seed,
+                            partial_obs=args.partial_obs, stochastic=args.stochastic)
 
             resolved_str = "OK" if t['resolved'] else "NO"
             print(f"base={b['score']:.3f}  trained={t['score']:.3f}  resolved={resolved_str}")
@@ -342,22 +411,31 @@ def main() -> None:
             base_scores.append(b["score"])
             trained_scores.append(t["score"])
 
-            b["policy"] = "base";    all_rows.append(b)
-            t["policy"] = "trained"; all_rows.append(t)
+            b["policy"] = "base"
+            t["policy"] = "trained"
+            all_rows.append(b)
+            all_rows.append(t)
 
         b_mean, b_std  = mean_std(base_scores)
         t_mean, t_std  = mean_std(trained_scores)
         delta           = round(t_mean - b_mean, 4)
         p_val           = paired_ttest_pvalue(base_scores, trained_scores)
+        degenerate      = is_degenerate(base_scores, trained_scores)
 
         summary[task] = {
             "base_mean":    b_mean,  "base_std":    b_std,
             "trained_mean": t_mean,  "trained_std": t_std,
             "delta":        delta,   "p_value":     p_val,
+            "degenerate":   degenerate,
             "base_scores":    base_scores,
             "trained_scores": trained_scores,
         }
-        significance = "p<0.05 SIGNIFICANT" if p_val < 0.05 else f"p={p_val} (n.s.)"
+        if degenerate:
+            significance = "DEGENERATE (zero variance across seeds — p-value meaningless)"
+        elif p_val < 0.05:
+            significance = "p<0.05 SIGNIFICANT"
+        else:
+            significance = f"p={p_val} (n.s.)"
         print(f"    -> base: {b_mean:.3f}+/-{b_std:.3f}  "
               f"trained: {t_mean:.3f}+/-{t_std:.3f}  "
               f"delta={delta:+.3f}  {significance}")
@@ -380,7 +458,7 @@ def main() -> None:
     all_deltas = [s["delta"] for s in summary.values()]
     avg_delta  = sum(all_deltas) / len(all_deltas) if all_deltas else 0
 
-    print(f"\n" + "-" * 60)
+    print("\n" + "-" * 60)
     print(f"  Average delta : {avg_delta:+.3f}")
     print(f"  Output dir    : {run_dir}")
     print(f"  Report        : {run_dir / 'report.md'}")

@@ -1,8 +1,9 @@
 """Unit tests for the grader / scoring system."""
 
 import pytest
+
 from env.environment import DevOpsEnv
-from graders.grader import compute_score, compute_breakdown
+from graders.grader import compute_breakdown, compute_score
 from tasks.task_config import TASK_CONFIGS
 
 

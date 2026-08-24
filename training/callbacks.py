@@ -4,10 +4,6 @@ from __future__ import annotations
 
 import csv
 import os
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from training.config import TrainConfig
 
 try:
     from transformers import TrainerCallback as _TrainerCallbackBase
@@ -30,6 +26,17 @@ class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
     CSV_COLUMNS = [
         "step",
         "reward",
+        # Mode-collapse alarm. GRPO's advantage is (r - group_mean) / group_std,
+        # so when every completion in a group is identical, reward_std is 0 and
+        # every advantage is 0 — training is running but no gradient is flowing.
+        # A flat reward curve with reward_std ~ 0 means collapse, not convergence.
+        # This column was previously dropped by an `endswith("_std")` skip, which
+        # is precisely why the first run's plateau was impossible to diagnose
+        # from the logs.
+        "reward_std",
+        # Emitted by newer TRL: fraction of groups in the batch with zero std.
+        # Blank on older TRL versions.
+        "frac_reward_zero_std",
         "reward_format_reward_func",
         "reward_step_reward_func",
         "reward_anti_cheat_reward_func",
@@ -62,11 +69,15 @@ class RewardLoggerCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
 
         row: dict = {"step": state.global_step}
         for raw_key, value in logs.items():
-            if raw_key == "reward" or raw_key.startswith("reward_") or raw_key.startswith("rewards/"):
-                col = self._normalize(raw_key)
-                if col.endswith("_std"):
-                    continue
-                row[col] = value
+            if (
+                raw_key in ("reward", "reward_std", "frac_reward_zero_std")
+                or raw_key.startswith("reward_")
+                or raw_key.startswith("rewards/")
+            ):
+                # reward_std and frac_reward_zero_std are kept deliberately —
+                # they are the only way to distinguish "converged" from
+                # "collapsed" on a flat reward curve. See CSV_COLUMNS.
+                row[self._normalize(raw_key)] = value
 
         for col in self.CSV_COLUMNS:
             row.setdefault(col, "")
@@ -106,6 +117,10 @@ class WandbRewardCallback(_TrainerCallbackBase):  # type: ignore[valid-type]
         for key, value in logs.items():
             if key == "reward":
                 metrics["train/reward"] = value
+            elif key in ("reward_std", "frac_reward_zero_std"):
+                # Collapse alarm — chart these alongside train/reward. A flat
+                # reward with reward_std -> 0 is mode collapse, not convergence.
+                metrics[f"train/{key}"] = value
             elif key.startswith("reward_") or key.startswith("rewards/"):
                 # Normalise to a clean W&B key: train/reward/format_reward_func
                 clean = key.replace("rewards/", "").replace("reward_", "").replace("_mean", "")

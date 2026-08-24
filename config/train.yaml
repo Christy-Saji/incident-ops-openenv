@@ -20,8 +20,11 @@ model:
   #                                   only works with num_generations=4 + batch_size=1
   id: "unsloth/Qwen2.5-3B-Instruct"
   lora_rank: 32
-  lora_alpha: 16
-  max_seq_length: 1024
+  # alpha = 2*rank is the convention. This was 16 against rank 32,
+  # giving alpha/r = 0.5 scaling — a quarter of the intended LoRA update.
+  lora_alpha: 64
+  # Must be >= max_prompt_length + max_completion_length (asserted in pipeline.py)
+  max_seq_length: 1280
   load_in_4bit: true
 
   # Set push_to_hub: true and HF_TOKEN in Colab secrets to auto-upload after training
@@ -38,12 +41,17 @@ training:
   per_device_train_batch_size: 2
   gradient_accumulation_steps: 4
   num_generations: 8
-  max_prompt_length: 512
+  # Prompts are ~700 tokens median / ~900 max. At 512 TRL LEFT-truncated them,
+  # silently deleting the system prompt and the head of the observation JSON
+  # for the entire first training run. pipeline.py now asserts this fits.
+  max_prompt_length: 1024
   max_completion_length: 32
 
   # Optimiser
-  learning_rate: 0.00001     # 1e-5
-  kl_coef: 0.04              # KL penalty — slows catastrophic forgetting on hard tasks
+  learning_rate: 0.00005     # 5e-5 — LoRA LR. Was 1e-5, which is a full-finetune LR.
+  # KL penalty against the SFT reference. Was 0.04, which anchored the policy to a
+  # reference that already answers every training prompt optimally — no room to move.
+  kl_coef: 0.005
   lr_scheduler_type: "cosine"
   warmup_steps: 8
   max_grad_norm: 0.3
