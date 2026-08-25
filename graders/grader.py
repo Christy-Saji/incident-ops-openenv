@@ -93,21 +93,16 @@ def compute_breakdown(task_name: str, state: Dict) -> Dict[str, float]:
     max_steps = config["max_steps"]
 
     actions_taken = state.get("actions_taken", [])
+    # Mitigation credit requires the diagnosis gate to have been passed (env v2,
+    # see env/environment.py::_mitigation_effective) — a blind mitigation attempt
+    # is still in actions_taken (the model tried it) but must not score progress.
+    effective_mitigations = state.get("effective_mitigations", set(actions_taken))
     diagnosis_done = sum(
         1 for action in config["required_diagnostics"] if action in actions_taken
     )
     mitigation_done = sum(
-        1 for action in config["required_mitigations"] if action in actions_taken
+        1 for action in config["required_mitigations"] if action in effective_mitigations
     )
-    # NOTE: computed but deliberately not consumed by the weighted score below.
-    # config["good_followups"] therefore has no effect on compute_score today —
-    # follow-up quality reaches the score only indirectly, via _communication_score.
-    # Left as-is on purpose: changing it would alter every published score.
-    # Revisit alongside the Tier-1 reward redesign.
-    _good_followups_done = sum(
-        1 for action in config["good_followups"] if action in actions_taken
-    )
-
     diagnosis = diagnosis_done / max(len(config["required_diagnostics"]), 1)
     mitigation = mitigation_done / max(len(config["required_mitigations"]), 1)
     recovery = _recovery_score(state)

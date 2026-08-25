@@ -60,6 +60,8 @@ TASK_CONFIGS = {
         "required_diagnostics": ["inspect_deploy_history"],
         "required_mitigations": ["rollback_auth_deploy"],
         "good_followups": ["acknowledge_incident", "resolve_incident"],
+        # Derived by scripts/derive_optimal.py (Q* argmax trajectory) --
+        # do not hand-edit; rerun the script after any env/task change.
         "optimal_actions": [
             "acknowledge_incident",
             "inspect_deploy_history",
@@ -112,12 +114,13 @@ TASK_CONFIGS = {
         "required_diagnostics": ["inspect_db_metrics"],
         "required_mitigations": ["scale_db_cluster", "shift_traffic_canary"],
         "good_followups": ["acknowledge_incident", "post_status_update", "resolve_incident"],
+        # Derived by scripts/derive_optimal.py (Q* argmax trajectory) --
+        # do not hand-edit; rerun the script after any env/task change.
         "optimal_actions": [
-            "acknowledge_incident",
             "inspect_db_metrics",
+            "post_status_update",
             "scale_db_cluster",
             "shift_traffic_canary",
-            "post_status_update",
             "resolve_incident",
         ],
     },
@@ -182,16 +185,17 @@ TASK_CONFIGS = {
             "post_status_update",
             "resolve_incident",
         ],
+        # Derived by scripts/derive_optimal.py (Q* argmax trajectory) --
+        # do not hand-edit; rerun the script after any env/task change.
         "optimal_actions": [
-            "acknowledge_incident",
             "inspect_auth_logs",
-            "inspect_deploy_history",
             "inspect_db_metrics",
+            "flush_cache",
             "rollback_auth_deploy",
+            "post_status_update",
+            "inspect_deploy_history",
             "scale_db_cluster",
             "shift_traffic_canary",
-            "flush_cache",
-            "post_status_update",
             "resolve_incident",
         ],
     },
@@ -258,13 +262,14 @@ TASK_CONFIGS = {
         "required_diagnostics": ["inspect_network_topology", "inspect_deploy_history"],
         "required_mitigations": ["withdraw_bgp_route", "shift_traffic_canary"],
         "good_followups": ["acknowledge_incident", "post_status_update", "resolve_incident"],
+        # Derived by scripts/derive_optimal.py (Q* argmax trajectory) --
+        # do not hand-edit; rerun the script after any env/task change.
         "optimal_actions": [
-            "acknowledge_incident",
-            "inspect_network_topology",
             "inspect_deploy_history",
-            "withdraw_bgp_route",
-            "shift_traffic_canary",
+            "inspect_network_topology",
             "post_status_update",
+            "shift_traffic_canary",
+            "withdraw_bgp_route",
             "resolve_incident",
         ],
     },
@@ -329,13 +334,15 @@ TASK_CONFIGS = {
         "required_diagnostics": ["inspect_memory_profile", "inspect_deploy_history"],
         "required_mitigations": ["rollback_service_deploy", "scale_db_cluster"],
         "good_followups": ["acknowledge_incident", "post_status_update", "resolve_incident"],
+        # Derived by scripts/derive_optimal.py (Q* argmax trajectory) --
+        # do not hand-edit; rerun the script after any env/task change.
         "optimal_actions": [
-            "acknowledge_incident",
-            "inspect_memory_profile",
+            "inspect_db_metrics",
             "inspect_deploy_history",
+            "inspect_memory_profile",
+            "post_status_update",
             "rollback_service_deploy",
             "scale_db_cluster",
-            "post_status_update",
             "resolve_incident",
         ],
     },
@@ -399,13 +406,14 @@ TASK_CONFIGS = {
         "required_diagnostics": ["inspect_disk_usage", "inspect_deploy_history"],
         "required_mitigations": ["archive_old_logs", "reduce_log_verbosity"],
         "good_followups": ["acknowledge_incident", "post_status_update", "resolve_incident"],
+        # Derived by scripts/derive_optimal.py (Q* argmax trajectory) --
+        # do not hand-edit; rerun the script after any env/task change.
         "optimal_actions": [
-            "acknowledge_incident",
-            "inspect_disk_usage",
             "inspect_deploy_history",
+            "inspect_disk_usage",
             "archive_old_logs",
-            "reduce_log_verbosity",
             "post_status_update",
+            "reduce_log_verbosity",
             "resolve_incident",
         ],
     },

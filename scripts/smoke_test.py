@@ -33,8 +33,11 @@ from training.reward_functions import (  # noqa: E402
 print("1. reward_functions imports")
 check("3-func imports work", True)
 check(
-    "ALL_REWARD_FUNCTIONS still intact",
-    len(ALL_REWARD_FUNCTIONS) == 9,
+    # Tier 1 Phase B: qstar_reward_func replaced the 9 hand-tuned signals as
+    # the primary training stack (format + qstar + diversity). See
+    # LEGACY_REWARD_FUNCTIONS for the retired 7.
+    "ALL_REWARD_FUNCTIONS is the Tier-1 Q* stack (format+qstar+diversity)",
+    len(ALL_REWARD_FUNCTIONS) == 3,
     f"len={len(ALL_REWARD_FUNCTIONS)}",
 )
 
@@ -103,25 +106,25 @@ check(
 )
 
 
-# ── 4. dataset warm-up produces zero-harm states ─────────────────────────────
-print("4. generate_grpo_dataset harm_action_count")
+# ── 4. GRPO eps-greedy dataset excludes held-out tasks ───────────────────────
+print("4. generate_grpo_dataset held-out tasks")
 try:
-    from training.dataset import generate_grpo_dataset
+    from training.dataset import DEFAULT_EVAL_TASKS, generate_grpo_dataset
 
-    ds = generate_grpo_dataset(per_task_n=2, mid_episode_n=18, seed=99)
-    harm_counts = []
+    ds = generate_grpo_dataset(n_states=40, seed=99)
+    seen_tasks = set()
     for sample in ds:
         try:
             state = json.loads(sample["prompt"][-1]["content"])
-            harm_counts.append(state.get("harmful_action_count", 0))
+            seen_tasks.add(state.get("task"))
         except Exception:
             pass
 
-    max_harm = max(harm_counts) if harm_counts else 0
+    leaked = seen_tasks & set(DEFAULT_EVAL_TASKS)
     check(
-        "All mid-episode states have harmful_action_count=0",
-        max_harm == 0,
-        f"max={max_harm}",
+        "No held-out task appears in the GRPO dataset",
+        not leaked,
+        f"leaked={leaked}",
     )
 except ImportError:
     print("  SKIPPED (datasets package not installed locally -- runs in Colab)")

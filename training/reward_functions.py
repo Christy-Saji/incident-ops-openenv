@@ -1,18 +1,20 @@
-"""All 9 GRPO reward signal functions for the Incident Ops environment.
+"""GRPO reward signal functions for the Incident Ops environment.
 
 Each function follows the TRL GRPOTrainer signature:
     f(prompts, completions, **kwargs) -> List[float]
 
-Reward signal index:
-  1. format_reward_func           — valid action string check
-  2. step_reward_func             — environment step reward (task-aware)
-  3. anti_cheat_reward_func       — penalise no_op / premature resolve / loops
-  4. task_alignment_reward_func   — task-correct diagnostics/mitigations
-  5. sequence_progress_reward_func— enforce diagnose→mitigate→communicate→resolve order
-  6. progress_delta_reward_func   — dense reward for measurable task progress
-  7. communication_gate_reward_func—gate comms until technical progress exists
-  8. terminal_outcome_reward_func — primary outcome signal (score delta + resolution)
-  9. diversity_reward_func        — penalise GRPO group-level mode collapse
+Tier 1, Phase B replaced the original 9 hand-tuned signals with exact Q*
+(training/qstar.py) as the primary signal, since it is the grader itself,
+maximised -- alignment with compute_score is structural rather than
+something to tune toward. See docs/prompts/tier1.md.
+
+Active stack (ALL_REWARD_FUNCTIONS / CORE_REWARD_FUNCTIONS):
+  format_reward_func   — valid action string check
+  qstar_reward_func    — primary signal: Q*(s,a) - max_a' Q*(s,a')
+  diversity_reward_func— penalise GRPO group-level mode collapse
+
+The original 7 (LEGACY_REWARD_FUNCTIONS) are retained, individually tested,
+but no longer wired into training -- see that constant's docstring below.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from env.environment import DevOpsEnv
 from env.models import VALID_ACTIONS
 from graders.grader import compute_score
 from tasks.task_config import TASK_CONFIGS
+from training.qstar import QStarTable, _rebuild_env, canonical_key, solve_cached
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -481,6 +484,84 @@ def terminal_outcome_reward_func(prompts, completions, **kwargs) -> List[float]:
 
 
 # ---------------------------------------------------------------------------
+# Q* reward (Tier 1, Phase B) -- primary training signal
+# ---------------------------------------------------------------------------
+
+_QSTAR_TABLES: dict[str, QStarTable] = {}
+
+
+def _qstar_table(task: str) -> QStarTable:
+    table = _QSTAR_TABLES.get(task)
+    if table is None:
+        table = solve_cached(task)
+        _QSTAR_TABLES[task] = table
+    return table
+
+
+def _qstar_best_value(table: QStarTable, task: str, state: dict) -> float:
+    """max_a' Q*(state, a'). table.values[key] already IS this max, by
+    construction of the backward induction in training/qstar.py::solve."""
+    key = canonical_key(state, state["step_count"])
+    if key in table.values:
+        return table.values[key]
+    score, _ = compute_score(task, state)
+    return score
+
+
+def _qstar_action_value(table: QStarTable, task: str, state: dict, action: str) -> float:
+    """Q*(state, action).
+
+    Exact whenever `state` and `action` are both in the precomputed table
+    (true for every state training/dataset.py's eps-greedy walk can produce,
+    since it samples off-path actions from the same training.qstar.relevant_actions
+    set the table was solved over). Falls back to a one-step simulate + lookup
+    of the successor's cached value for any other action the policy might
+    emit during GRPO sampling (the policy's action vocabulary is the full 19,
+    not just the relevant set) -- exact if the successor state is itself
+    cached, a safe (compute_score-based) underestimate of the true reachable
+    value otherwise.
+    """
+    key = canonical_key(state, state["step_count"])
+    qvals = table.q_values.get(key)
+    if qvals and action in qvals:
+        return qvals[action]
+
+    env = _rebuild_env(task, state)
+    env.step(action)
+    nkey = canonical_key(env._state, env.current_step)
+    if nkey in table.values:
+        return table.values[nkey]
+    score, _ = compute_score(task, env._state)
+    return score
+
+
+def qstar_reward_func(prompts, completions, **kwargs) -> List[float]:
+    """Primary reward: reward(s,a) = Q*(s,a) - max_a' Q*(s,a').
+
+    <= 0 everywhere, exactly 0 on every action that lies on a score-maximising
+    path from the replayed state. This is the grader itself, maximised --
+    alignment with compute_score is structural rather than something to tune
+    toward (see training/qstar.py and docs/prompts/tier1.md Phase B).
+    """
+    rewards: List[float] = []
+    for prompt, completion in zip(prompts, completions):
+        action = extract_action(completion[0]["content"] or "")
+        if action not in VALID_ACTIONS:
+            rewards.append(-0.5)
+            continue
+        try:
+            env, _, task = _replay_env_from_prompt(prompt)
+            table = _qstar_table(task)
+            state = env._state
+            best = _qstar_best_value(table, task, state)
+            q_sa = _qstar_action_value(table, task, state, action)
+            rewards.append(float(max(-1.0, min(0.0, q_sa - best))))
+        except Exception:
+            rewards.append(-0.5)
+    return rewards
+
+
+# ---------------------------------------------------------------------------
 # 9. Diversity reward
 # ---------------------------------------------------------------------------
 
@@ -535,34 +616,41 @@ def diversity_reward_func(prompts, completions, **kwargs) -> List[float]:
 # Convenience list — import this in pipeline.py
 # ---------------------------------------------------------------------------
 
+# Tier 1, Phase B: qstar_reward_func is now the primary training signal.
+# format_reward_func (malformed-output guard) and diversity_reward_func
+# (per-completion anti-collapse) are kept alongside it because neither
+# overlaps with Q* -- one polices output syntax, the other polices GRPO
+# group-level mode collapse, and both stay ~0 on a well-formed, diverse batch.
+#
+# Used by training/pipeline.py.
 ALL_REWARD_FUNCTIONS = [
     format_reward_func,
+    qstar_reward_func,
+    diversity_reward_func,
+]
+
+# The reduced set used by colab_training.ipynb: Q* alone, no format/diversity
+# shaping. Defined here rather than inline in the notebook so the notebook,
+# the pipeline and tests/test_reward_ranking.py cannot drift apart. Both
+# stacks are measured by that test.
+CORE_REWARD_FUNCTIONS = [
+    qstar_reward_func,
+]
+
+# The original 9 hand-tuned functions this file used before Tier 1's Q*
+# redesign (docs/prompts/tier1.md Phase B). Retired from ALL_REWARD_FUNCTIONS
+# and CORE_REWARD_FUNCTIONS -- test_reward_ranking.py showed the reward
+# argmax disagreed with the optimal action on roughly half of all training
+# states, and reward-grader alignment with this stack was something to
+# hand-tune toward rather than a structural property. Kept importable, and
+# individually unit-tested in tests/test_reward_functions.py, purely for a
+# future ablation comparison against qstar_reward_func.
+LEGACY_REWARD_FUNCTIONS = [
     step_reward_func,
     anti_cheat_reward_func,
     task_alignment_reward_func,
     sequence_progress_reward_func,
     progress_delta_reward_func,
     communication_gate_reward_func,
-    terminal_outcome_reward_func,
-    diversity_reward_func,
-]
-
-
-# The reduced, less-overlapping subset used by colab_training.ipynb.
-#
-# Functions 2, 4, 5, 6, 7 and 8 all compute a variant of "is this action a
-# required diagnostic/mitigation that has not been taken yet", so summing all
-# nine is closer to one signal counted six times than to nine signals. This
-# subset keeps the three least-redundant ones:
-#   task_alignment    — is the action correct for this specific task
-#   sequence_progress — diagnose -> mitigate -> communicate -> resolve ordering
-#   terminal_outcome  — episodic outcome (score delta + resolution)
-#
-# Defined here rather than inline in the notebook so the notebook, the pipeline
-# and tests/test_reward_ranking.py cannot drift apart. Both stacks are measured
-# by that test.
-CORE_REWARD_FUNCTIONS = [
-    task_alignment_reward_func,
-    sequence_progress_reward_func,
     terminal_outcome_reward_func,
 ]

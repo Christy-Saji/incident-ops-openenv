@@ -29,8 +29,8 @@ A custom OpenAI Gym-style environment where a language model acts as an on-call 
 
 The model is trained using a two-phase pipeline:
 
-1. **SFT warm-start** — supervised fine-tuning on optimal trajectories across all 6 scenarios
-2. **GRPO** — group relative policy optimisation with 9 independent reward signals
+1. **SFT warm-start** — supervised fine-tuning on optimal trajectories across the 4 held-in scenarios (`easy`, `medium`, `hard`, `network`); `memory_leak` and `disk_full` are held out entirely for evaluation
+2. **GRPO** — group relative policy optimisation, primarily rewarded by exact Q\* (`training/qstar.py`) over an eps-greedy-expanded state distribution
 
 Training uses [Unsloth](https://github.com/unslothai/unsloth) + [TRL](https://github.com/huggingface/trl) on Google Colab (T4 16 GB VRAM). The trained model is evaluated locally via the FastAPI server and the multi-run evaluation script.
 
@@ -51,8 +51,9 @@ incident-ops-openenv/
 │
 ├── training/                 # Training package (extracted from monolithic train.py)
 │   ├── config.py             # TrainConfig dataclass + YAML loader
-│   ├── reward_functions.py   # All 9 GRPO reward signal functions
-│   ├── dataset.py            # SFT + GRPO dataset builders, state enumeration
+│   ├── qstar.py               # Exact Q* solver (BFS + backward induction / beam fallback)
+│   ├── reward_functions.py   # format + qstar + diversity (+ 7 retired LEGACY_REWARD_FUNCTIONS)
+│   ├── dataset.py            # SFT dataset + eps-greedy GRPO dataset, train/eval task split
 │   ├── prompting.py          # SYSTEM_PROMPT + build_prompt (shared by train/eval/compare)
 │   ├── callbacks.py          # RewardLoggerCallback + WandbRewardCallback
 │   ├── plot.py               # Reward curve (with reward_std collapse panel)
@@ -60,13 +61,13 @@ incident-ops-openenv/
 │
 ├── env/
 │   ├── environment.py        # DevOpsEnv (gym-style: reset/step/state/score/episode)
-│   └── models.py             # Action types, observation schema
+│   └── models.py             # Action types, observation schema, MITIGATION_PREREQS gate
 │
 ├── graders/
 │   └── grader.py             # compute_score() — 5-component weighted scoring
 │
 ├── tasks/
-│   └── task_config.py        # 6 incident scenario definitions
+│   └── task_config.py        # 6 incident scenario definitions (optimal_actions is Q*-derived)
 │
 ├── server/
 │   └── app.py                # FastAPI routes (reset, step, demo, score, leaderboard)
@@ -76,14 +77,16 @@ incident-ops-openenv/
 │
 ├── scripts/
 │   ├── evaluate.py           # Multi-run eval: N seeds, mean±std, paired t-test
+│   ├── derive_optimal.py     # Regenerates task_config.py's optimal_actions from Q*
 │   └── smoke_test.py         # Quick end-to-end sanity check
 │
-├── tests/                    # 70 tests, CPU-only, no model loading
+├── tests/                    # 83 tests, CPU-only, no model loading
 │   ├── conftest.py
-│   ├── test_reward_functions.py  # 35 tests — all 9 reward funcs
-│   ├── test_environment.py       # 19 tests — all 6 tasks, reset/step/obs/optimal
+│   ├── test_reward_functions.py  # 35 tests — reward funcs incl. retired LEGACY set
+│   ├── test_environment.py       # 24 tests — all 6 tasks, reset/step/obs/optimal, gating
 │   ├── test_grader.py            # 13 tests — score ranges, component validation
-│   └── test_reward_ranking.py    #  3 tests — reward-vs-optimal tripwire (1 XFAIL)
+│   ├── test_reward_ranking.py    #  6 tests — reward-vs-Q*-optimal tripwire (hard assert)
+│   └── test_dataset.py           #  5 tests — GRPO dataset size, SFT/GRPO disjointness, held-out tasks
 │
 ├── .dockerignore
 └── .github/workflows/ci.yml  # Lint (ruff) + pytest + Docker smoke test
@@ -108,19 +111,29 @@ The scenarios are heterogeneous by design — a repeated diagnostic pattern does
 
 ## Reward System
 
-GRPO training uses 9 independent reward signals:
+GRPO training uses 3 reward signals (`training/reward_functions.py::ALL_REWARD_FUNCTIONS`):
 
-| # | Signal | Purpose |
-|---|--------|---------|
-| 1 | `format_reward` | Valid action string check |
-| 2 | `step_reward` | Environment step reward (task-aware) |
-| 3 | `anti_cheat_reward` | Loop detection, no-op penalty |
-| 4 | `task_alignment_reward` | Task-correct diagnostics/mitigations |
-| 5 | `sequence_progress_reward` | Enforce diagnose→mitigate→resolve order |
-| 6 | `progress_delta_reward` | Dense reward for measurable task progress |
-| 7 | `communication_gate_reward` | Gate comms until technical progress exists |
-| 8 | `terminal_outcome_reward` | Primary outcome signal (score delta + resolution) |
-| 9 | `diversity_reward` | Penalise duplicate actions within a GRPO group |
+| Signal | Purpose |
+|--------|---------|
+| `format_reward` | Valid action string check |
+| `qstar_reward` | **Primary signal.** `Q*(s,a) - max_a' Q*(s,a')` |
+| `diversity_reward` | Penalise duplicate actions within a GRPO group |
+
+`qstar_reward` is exact Q\* over the environment's finite, deterministic state
+space (`training/qstar.py`): the best final `compute_score` reachable after
+taking action `a` from state `s`, computed by depth-indexed BFS + backward
+induction (falling back to a width-60 beam search on tasks where exact search
+doesn't terminate in reasonable time — verified equal on every task where both
+ran). Because the reward *is* the grader, maximised, reward-grader alignment is
+structural rather than something to tune toward: `tests/test_reward_ranking.py`
+hard-asserts the reward stack ranks a Q\*-optimal action first in every training
+state.
+
+This replaced an earlier 9-hand-tuned-function stack (kept as
+`LEGACY_REWARD_FUNCTIONS` for reference/ablation) whose reward argmax disagreed
+with the optimal action on roughly half of all training states — GRPO cannot
+learn a policy where the reward and the grader disagree, no matter how long you
+train.
 
 `diversity_reward` is scored **per completion** (each one penalised by how many
 siblings duplicate it), not per group. A reward that assigns the same value to
@@ -128,7 +141,12 @@ every completion in a group is cancelled exactly by GRPO's group-mean baseline
 and cannot influence a single gradient — which is what the earlier group-uniform
 version did.
 
-The environment scoring (`compute_score`) uses 5 weighted components: diagnosis quality, mitigation completion, recovery, communication, and efficiency. See *Known Limitations* for how well this stack currently ranks the optimal action.
+The environment scoring (`compute_score`) uses 5 weighted components: diagnosis
+quality, mitigation completion, recovery, communication, and efficiency.
+Mitigation credit requires the diagnosis gate to have been passed first
+(`env/models.py::MITIGATION_PREREQS`) — a mitigation applied before its
+prerequisite diagnostic is a no-op that increments `harmful_action_count`
+rather than a free pass to skip triage.
 
 ---
 
@@ -212,6 +230,10 @@ model:
 
 training:
   grpo_max_steps: 500
+  train_tasks: ["easy", "medium", "hard", "network"]  # held-in for SFT + GRPO
+  eval_tasks: ["memory_leak", "disk_full"]             # held out of both entirely
+  epsilon: 0.3             # eps-greedy off-Q*-path action probability (training/dataset.py)
+  n_states: 1000           # target unique GRPO prompts
   num_generations: 8
   max_prompt_length: 1024 # prompts are ~700 tok median; at 512 TRL left-truncated them
   learning_rate: 0.00005  # 5e-5 — a LoRA LR, not a full-finetune one

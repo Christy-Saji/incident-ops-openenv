@@ -31,6 +31,30 @@ VALID_ACTIONS = [
     "reduce_log_verbosity",       # new: dial logging back to INFO/WARN
 ]
 
+INSPECT_ACTIONS = {a for a in VALID_ACTIONS if a.startswith("inspect_")}
+
+# Mitigation -> diagnostics that unlock it. The relationship is physical
+# (you cannot archive logs before looking at disk usage), not task-specific,
+# so it lives here beside VALID_ACTIONS rather than in per-task config.
+# Semantics: ANY ONE listed diagnostic unlocks the mitigation.
+#
+# shift_traffic_canary is deliberately absent — it is generic load-shedding,
+# unlocked by ANY completed diagnostic (see env/environment.py::_mitigation_effective).
+MITIGATION_PREREQS: Dict[str, set] = {
+    "rollback_auth_deploy":    {"inspect_deploy_history", "inspect_auth_logs"},
+    "rollback_service_deploy": {"inspect_deploy_history", "inspect_memory_profile"},
+    "restart_auth_service":    {"inspect_auth_logs"},
+    "scale_db_cluster":        {"inspect_db_metrics"},
+    "flush_cache":             {"inspect_db_metrics"},
+    "withdraw_bgp_route":      {"inspect_network_topology"},
+    "archive_old_logs":        {"inspect_disk_usage"},
+    "reduce_log_verbosity":    {"inspect_disk_usage"},
+}
+
+# All gated mitigations, including shift_traffic_canary (whose gate lives in
+# _mitigation_effective rather than MITIGATION_PREREQS).
+GATED_MITIGATIONS = set(MITIGATION_PREREQS) | {"shift_traffic_canary"}
+
 
 class MetricsSnapshot(BaseModel):
     cpu_usage: int = Field(ge=0, le=100)

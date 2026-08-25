@@ -47,8 +47,9 @@ def run(config: "TrainConfig") -> None:
                     "lora_rank":      config.model.lora_rank,
                     "grpo_max_steps": config.training.grpo_max_steps,
                     "num_generations":config.training.num_generations,
-                    "per_task_n":     config.training.per_task_prompts,
-                    "mid_episode_n":  config.training.mid_episode_prompts,
+                    "train_tasks":    config.training.train_tasks,
+                    "n_states":       config.training.n_states,
+                    "epsilon":        config.training.epsilon,
                     "seed":           config.seed,
                 },
             )
@@ -83,7 +84,7 @@ def run(config: "TrainConfig") -> None:
     # 2. Phase 1 — SFT warm-start
     # ------------------------------------------------------------------
     print("\n[2] Phase 1 — SFT warm-start on optimal trajectories...")
-    sft_dataset = generate_sft_dataset(seed=config.seed)
+    sft_dataset = generate_sft_dataset(seed=config.seed, tasks=config.training.train_tasks)
 
     def format_sft_sample(example):
         messages = example["prompt"] + example["completion"]
@@ -121,9 +122,10 @@ def run(config: "TrainConfig") -> None:
     # ------------------------------------------------------------------
     print(f"\n[3] Phase 2 — GRPO curriculum (max_steps={config.training.grpo_max_steps})...")
     grpo_dataset = generate_grpo_dataset(
-        per_task_n=config.training.per_task_prompts,
-        mid_episode_n=config.training.mid_episode_prompts,
+        n_states=config.training.n_states,
+        epsilon=config.training.epsilon,
         seed=config.seed,
+        tasks=config.training.train_tasks,
     )
 
     _assert_prompts_fit(

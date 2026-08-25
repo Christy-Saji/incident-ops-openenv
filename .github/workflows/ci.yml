@@ -38,12 +38,17 @@ jobs:
           pytest tests/test_reward_functions.py -v --tb=short -rxX \
             -k "TestExtractAction or TestFormatReward or TestAntiCheatReward or TestDiversityReward or TestBatchConsistency"
 
-      # Tier-1 tripwire: reports how many training states the reward stack ranks
-      # correctly. Expected to XFAIL until the reward functions are redesigned —
-      # -rxX prints the live N/33 count in the summary on every run.
-      - name: Reward ranking sanity check (expected XFAIL until Tier 1)
+      # Tier-1 Phase B: qstar_reward_func's reward is Q*(s,a) - max_a' Q*(s,a') by
+      # construction, so this is a hard assert, not an XFAIL — it goes red if a
+      # future change to the env or the reward stack ever breaks that alignment.
+      - name: Reward ranking sanity check (Q*-optimal, hard assert)
         run: |
           pytest tests/test_reward_ranking.py -v --tb=short -rxX
+
+      # Tier-1 Phase C: GRPO dataset size, SFT/GRPO disjointness, held-out tasks.
+      - name: Dataset generation tests
+        run: |
+          pytest tests/test_dataset.py -v --tb=short -rxX
 
   docker:
     name: Docker Build + Smoke Test
