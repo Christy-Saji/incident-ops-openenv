@@ -8,17 +8,20 @@ with A, the two phases actively fight, with the KL term holding the policy at A
 while the reward pulls toward B.
 
 This module measures that agreement over every state on every task's optimal
-trajectory (training/dataset.iter_training_states).
+trajectory (training/dataset.iter_training_states), where "optimal" now means
+Q*-optimal: an action is correct if Q*(s,a) == max_a' Q*(s,a') (training/qstar.py),
+not membership in a single hand-blessed sequence. That is what makes a genuine
+tie (e.g. rollback_auth_deploy vs shift_traffic_canary when both are required
+mitigations and order between them is arbitrary) score as correct for either
+ordering, rather than the over-specified single-answer check this test used
+before Tier 1's Q* redesign (docs/prompts/tier1.md Phase B).
 
-CURRENT STATUS: the reward stack ranks the optimal action first on roughly half
-of the states, so test_reward_argmax_matches_optimal_action is expected to XFAIL.
-That is recorded debt, not a flaky test. CI runs with -rxX so the live count
-prints in the summary on every run.
-
-WHEN THE TIER-1 REWARD REDESIGN IS DONE: replace the pytest.xfail() call with
-    assert matches == total, report
-so the suite goes red if the reward stack ever regresses. Reaching 100% here is
-the definition of done for that redesign.
+STATUS: qstar_reward_func is the primary signal (see training/reward_functions.py)
+and reward(s,a) = Q*(s,a) - max_a' Q*(s,a') by construction, so agreement here is
+a structural property of the reward, not something tuned toward -- this is a hard
+assert, not an xfail. If it ever goes red, the regression is in training/qstar.py
+or in how a reward stack composes qstar_reward_func with the others, not in this
+test.
 
 Run standalone for the full per-state table:
     python tests/test_reward_ranking.py
@@ -35,21 +38,45 @@ import pytest
 # be run directly (python tests/test_reward_ranking.py) for the full report.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from env.environment import DevOpsEnv  # noqa: E402
 from env.models import VALID_ACTIONS  # noqa: E402
 from training.dataset import iter_training_states  # noqa: E402
 from training.prompting import build_prompt  # noqa: E402
+from training.qstar import canonical_key, solve_cached  # noqa: E402
 from training.reward_functions import (  # noqa: E402
     ALL_REWARD_FUNCTIONS,
     CORE_REWARD_FUNCTIONS,
 )
 
-# Both stacks are measured: ALL_REWARD_FUNCTIONS is what training/pipeline.py
-# uses, CORE_REWARD_FUNCTIONS is what colab_training.ipynb uses. They are
-# different training paths and both must be checked.
+# ALL_REWARD_FUNCTIONS is what training/pipeline.py uses, CORE_REWARD_FUNCTIONS
+# is what colab_training.ipynb uses. Both are Q*-based post Tier-1 Phase B and
+# both must be checked, since they are different training paths.
 REWARD_STACKS = {
-    "all9":  ALL_REWARD_FUNCTIONS,
-    "core3": CORE_REWARD_FUNCTIONS,
+    "all": ALL_REWARD_FUNCTIONS,
+    "core": CORE_REWARD_FUNCTIONS,
 }
+
+
+def _is_qstar_optimal(task: str, prefix: list[str], action: str) -> bool:
+    """Is `action` on a Q*-optimal path from the state reached by `prefix`?
+
+    Replays `prefix` (the exact actions_taken history for this training
+    state, from iter_training_states) through a fresh env to get the
+    canonical key -- the observation dict alone doesn't carry step_count /
+    harmful_action_count / effective_mitigations needed to key the Q* table.
+    """
+    env = DevOpsEnv(task=task)
+    env.reset()
+    for step_action in prefix:
+        env.step(step_action)
+
+    table = solve_cached(task)
+    key = canonical_key(env._state, env.current_step)
+    qvals = table.q_values.get(key)
+    if not qvals:
+        return True  # terminal/unexplored state — nothing to disagree about
+    best = max(qvals.values())
+    return action in qvals and qvals[action] == best
 
 # ---------------------------------------------------------------------------
 # Scoring helper
@@ -74,7 +101,7 @@ def score_all_actions(state: dict, reward_funcs=None) -> dict[str, float]:
 
 
 def rank_training_states(reward_funcs=None) -> list[dict]:
-    """Score every training state and record whether the argmax is optimal."""
+    """Score every training state and record whether the argmax is Q*-optimal."""
     results = []
     for ts in iter_training_states():
         scores = score_all_actions(ts.state, reward_funcs)
@@ -85,7 +112,7 @@ def rank_training_states(reward_funcs=None) -> list[dict]:
             "prefix":          ts.prefix,
             "expected":        ts.expected_action,
             "argmax":          best_action,
-            "correct":         best_action == ts.expected_action,
+            "correct":         _is_qstar_optimal(ts.task, ts.prefix, best_action),
             "expected_score":  scores[ts.expected_action],
             "argmax_score":    best_score,
             "margin":          round(best_score - scores[ts.expected_action], 4),
@@ -100,17 +127,16 @@ def rank_training_states(reward_funcs=None) -> list[dict]:
 
 @pytest.mark.parametrize("stack_name", sorted(REWARD_STACKS))
 def test_reward_argmax_matches_optimal_action(stack_name):
-    """The reward stack should rank the optimal action first in every state.
+    """The reward stack must rank a Q*-optimal action first in every state.
 
-    Expected to XFAIL until the Tier-1 reward redesign lands. See module docstring.
+    Hard assert (Tier-1 Phase B is done): qstar_reward_func's reward is
+    Q*(s,a) - max_a' Q*(s,a') by construction, so this is expected to hold
+    structurally rather than by tuning. See module docstring.
     """
     results = rank_training_states(REWARD_STACKS[stack_name])
     total    = len(results)
     matches  = sum(r["correct"] for r in results)
     mismatches = [r for r in results if not r["correct"]]
-
-    if matches == total:
-        return  # reward stack and optimal policy agree everywhere
 
     detail = "; ".join(
         f"{r['task']}[{len(r['prefix'])}] want={r['expected']} got={r['argmax']} "
@@ -119,12 +145,9 @@ def test_reward_argmax_matches_optimal_action(stack_name):
     )
     more = f" (+{len(mismatches) - 6} more)" if len(mismatches) > 6 else ""
 
-    pytest.xfail(
-        reason=(
-            f"[{stack_name}] reward argmax matches optimal action: {matches}/{total} states. "
-            f"GRPO cannot learn the optimal policy where these disagree. "
-            f"Mismatches: {detail}{more}"
-        )
+    assert matches == total, (
+        f"[{stack_name}] reward argmax matches Q*-optimal action: {matches}/{total} states. "
+        f"Mismatches: {detail}{more}"
     )
 
 

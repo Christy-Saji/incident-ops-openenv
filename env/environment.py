@@ -4,7 +4,7 @@ import copy
 import random
 from typing import Dict, List, Tuple
 
-from env.models import VALID_ACTIONS, Action, Observation
+from env.models import GATED_MITIGATIONS, MITIGATION_PREREQS, VALID_ACTIONS, Action, Observation
 from graders.grader import compute_score
 from tasks.task_config import TASK_CONFIGS
 
@@ -59,6 +59,7 @@ class DevOpsEnv:
             "resolved": False,
             "harmful_action_count": 0,
             "step_count": 0,
+            "effective_mitigations": set(),
         }
         return self.state()
 
@@ -78,6 +79,8 @@ class DevOpsEnv:
 
         Action(name=action)
 
+        prior_actions = set(self._state["actions_taken"])
+
         self._state["actions_taken"].append(action)
         self._state["recent_actions"] = (self._state["recent_actions"] + [action])[-5:]
 
@@ -85,7 +88,15 @@ class DevOpsEnv:
             self._state["harmful_action_count"] += 1
         self._last_action = action
 
-        self._apply_action(action)
+        gate_ok = True
+        if action in GATED_MITIGATIONS:
+            gate_ok = self._mitigation_effective(action, prior_actions)
+            if gate_ok:
+                self._state["effective_mitigations"].add(action)
+            else:
+                info["error"] = "mitigation_without_diagnosis"
+
+        self._apply_action(action, gate_ok=gate_ok)
         self._apply_background_dynamics()
 
         self.current_step += 1
@@ -104,6 +115,8 @@ class DevOpsEnv:
             penalty -= 0.02
         if info.get("error") == "incident_not_stable":
             penalty -= 0.04
+        if info.get("error") == "mitigation_without_diagnosis":
+            penalty -= 0.06
 
         reward = max(-0.25, min(1.0, round(raw_reward + penalty, 2)))
 
@@ -195,8 +208,32 @@ class DevOpsEnv:
             "observation": self.state(),
         })
 
-    def _apply_action(self, action: str) -> None:
+    def _mitigation_effective(self, action: str, prior_actions: set) -> bool:
+        """Is `action` unlocked given the diagnostics already performed?
+
+        shift_traffic_canary is generic load-shedding: any completed
+        diagnostic unlocks it. Every other gated mitigation requires one of
+        its specific MITIGATION_PREREQS to already be in prior_actions.
+        Shared by step() (to gate _apply_action) and _apply_background_dynamics
+        (via self._state["effective_mitigations"]) so both respect the gate.
+        """
+        if action == "shift_traffic_canary":
+            return any(a.startswith("inspect_") for a in prior_actions)
+        prereqs = MITIGATION_PREREQS.get(action)
+        if not prereqs:
+            return True
+        return bool(prereqs & prior_actions)
+
+    def _apply_action(self, action: str, gate_ok: bool = True) -> None:
         config = TASK_CONFIGS[self.task]
+
+        if action in GATED_MITIGATIONS and not gate_ok:
+            self._state["harmful_action_count"] += 1
+            self._append_unique(
+                self._state["known_findings"],
+                f"Blind {action} attempted without diagnosis — no effect.",
+            )
+            return
 
         if action == "acknowledge_incident":
             self._append_unique(
@@ -365,7 +402,11 @@ class DevOpsEnv:
             self._state["harmful_action_count"] += 1
 
     def _apply_background_dynamics(self) -> None:
-        actions = set(self._state["actions_taken"])
+        # Only mitigations that passed the diagnosis gate (see
+        # _mitigation_effective) may drive service/metric recovery below —
+        # otherwise a blind mitigation that _apply_action already blocked
+        # would be silently re-applied here.
+        actions = self._state["effective_mitigations"]
         metrics = self._state["metrics"]
         status = self._state["service_status"]
 
@@ -507,7 +548,7 @@ class DevOpsEnv:
         """
         config = TASK_CONFIGS[self.task]
         required_mit = set(config.get("required_mitigations", []))
-        completed = set(self._state["actions_taken"])
+        completed = self._state["effective_mitigations"]
         return self._is_stable() and required_mit.issubset(completed)
 
     def _apply_noise(self) -> None:

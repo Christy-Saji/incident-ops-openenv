@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 try:
     import yaml  # PyYAML
@@ -45,8 +45,17 @@ class TrainingConfig:
     """GRPO and SFT hyperparameters."""
     # GRPO
     grpo_max_steps: int = 300
-    per_task_prompts: int = 8
-    mid_episode_prompts: int = 60
+    # Tier 1 Phase C: train/eval task split + eps-greedy dataset sizing.
+    # memory_leak/disk_full held out of both SFT and GRPO so
+    # scripts/evaluate.py's held-out eval is meaningful.
+    train_tasks: List[str] = field(
+        default_factory=lambda: ["easy", "medium", "hard", "network"]
+    )
+    eval_tasks: List[str] = field(
+        default_factory=lambda: ["memory_leak", "disk_full"]
+    )
+    epsilon: float = 0.3        # off-Q*-path action probability in the eps-greedy walk
+    n_states: int = 1000        # target unique GRPO prompts (training/dataset.py)
     per_device_train_batch_size: int = 1
     gradient_accumulation_steps: int = 8
     num_generations: int = 4            # number of GRPO rollouts per prompt
@@ -109,10 +118,10 @@ class TrainConfig:
         """Apply GRPO_* environment variable overrides in-place."""
         if val := os.environ.get("GRPO_MAX_STEPS"):
             self.training.grpo_max_steps = int(val)
-        if val := os.environ.get("GRPO_PER_TASK_PROMPTS"):
-            self.training.per_task_prompts = int(val)
-        if val := os.environ.get("GRPO_MID_EPISODE_PROMPTS"):
-            self.training.mid_episode_prompts = int(val)
+        if val := os.environ.get("GRPO_N_STATES"):
+            self.training.n_states = int(val)
+        if val := os.environ.get("GRPO_EPSILON"):
+            self.training.epsilon = float(val)
         if val := os.environ.get("HF_TOKEN"):
             self.model.hub_token = val
         if val := os.environ.get("WANDB_PROJECT"):
@@ -157,8 +166,9 @@ class TrainConfig:
             f"Model      : {self.model.id}",
             f"LoRA rank  : {self.model.lora_rank}",
             f"GRPO steps : {self.training.grpo_max_steps}",
-            f"Prompts/task: {self.training.per_task_prompts}",
-            f"Mid-episode: {self.training.mid_episode_prompts}",
+            f"Train tasks: {self.training.train_tasks}",
+            f"Eval tasks : {self.training.eval_tasks}",
+            f"GRPO states: {self.training.n_states} (epsilon={self.training.epsilon})",
             f"Batch size : {self.training.per_device_train_batch_size} "
             f"(grad_accum={self.training.gradient_accumulation_steps})",
             f"Generations: {self.training.num_generations}",

@@ -96,6 +96,55 @@ class TestEnvStep:
         assert done
 
 
+class TestMitigationGating:
+    """env v2: a mitigation applied before its prerequisite diagnostic is a no-op."""
+
+    def test_blind_mitigation_is_noop(self):
+        env = DevOpsEnv(task="easy")
+        env.reset()
+        _, reward, _, info = env.step("rollback_auth_deploy")
+        assert info.get("error") == "mitigation_without_diagnosis"
+        assert env._state["service_status"]["auth"] == "degraded"
+        assert env._state["harmful_action_count"] == 1
+        assert reward < 0
+
+    def test_blind_mitigation_not_in_effective_mitigations(self):
+        env = DevOpsEnv(task="easy")
+        env.reset()
+        env.step("rollback_auth_deploy")
+        assert "rollback_auth_deploy" not in env._state["effective_mitigations"]
+        assert "rollback_auth_deploy" in env._state["actions_taken"]
+
+    def test_diagnose_then_mitigate_is_effective(self):
+        env = DevOpsEnv(task="easy")
+        env.reset()
+        env.step("inspect_deploy_history")
+        env.step("rollback_auth_deploy")
+        assert "rollback_auth_deploy" in env._state["effective_mitigations"]
+        assert env._state["service_status"]["auth"] == "running"
+
+    def test_blind_mitigation_blocks_resolution(self):
+        env = DevOpsEnv(task="easy")
+        env.reset()
+        env.step("acknowledge_incident")
+        env.step("rollback_auth_deploy")  # blind -- blocked
+        _, _, _, info = env.step("resolve_incident")
+        assert info.get("error") == "incident_not_stable"
+        assert not env._state["resolved"]
+
+    def test_shift_traffic_canary_requires_any_diagnostic(self):
+        env = DevOpsEnv(task="medium")
+        env.reset()
+        _, _, _, info = env.step("shift_traffic_canary")
+        assert info.get("error") == "mitigation_without_diagnosis"
+
+        env2 = DevOpsEnv(task="medium")
+        env2.reset()
+        env2.step("inspect_db_metrics")
+        env2.step("shift_traffic_canary")
+        assert "shift_traffic_canary" in env2._state["effective_mitigations"]
+
+
 class TestPartialObservability:
     def test_partial_obs_hides_findings(self):
         env = DevOpsEnv(task="easy", partial_obs=True)

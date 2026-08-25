@@ -34,8 +34,15 @@ model:
 training:
   # GRPO
   grpo_max_steps: 500
-  per_task_prompts: 8
-  mid_episode_prompts: 60
+  # Tier 1 Phase C: memory_leak/disk_full held out of SFT + GRPO entirely,
+  # so scripts/evaluate.py's held-out eval on them is meaningful.
+  train_tasks: ["easy", "medium", "hard", "network"]
+  eval_tasks: ["memory_leak", "disk_full"]
+  # eps-greedy walk (training/dataset.py::iter_eps_greedy_states): with
+  # probability epsilon, take a random action instead of the Q*-optimal one,
+  # so GRPO sees states beyond the ones SFT already memorised.
+  epsilon: 0.3
+  n_states: 1000
 
   # Hardware settings tuned for Colab T4 (16 GB VRAM)
   per_device_train_batch_size: 2

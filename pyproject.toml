@@ -36,6 +36,10 @@ eval = [
 dev = [
     "pytest",
     "ruff",
+    # CPU-only, no torch: training/dataset.py's generate_sft_dataset() /
+    # generate_grpo_dataset() need it to build a HuggingFace Dataset, and
+    # tests/test_dataset.py exercises both in CI.
+    "datasets",
 ]
 
 [project.scripts]
