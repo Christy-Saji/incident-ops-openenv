@@ -50,10 +50,11 @@ jobs:
         run: |
           pytest tests/test_dataset.py -v --tb=short -rxX
 
-      # Config + hardware-profile seam (Colab/Unsloth vs AMD/transformers selection).
-      - name: Config + hardware-profile tests
+      # Config + hardware-profile seam (Colab/Unsloth vs AMD/transformers selection)
+      # and the backend seam's unsloth-before-trl import-ordering tripwire.
+      - name: Config + backend seam tests
         run: |
-          pytest tests/test_config.py -v --tb=short -rxX
+          pytest tests/test_config.py tests/test_backend.py -v --tb=short -rxX
 
   docker:
     name: Docker Build + Smoke Test
