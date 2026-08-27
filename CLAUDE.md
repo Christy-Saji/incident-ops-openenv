@@ -131,17 +131,26 @@ over `[0, 1]`, used both as the terminal env score and as the delta source for s
 - `train_tasks`/`eval_tasks` in `config/train.yaml` must stay disjoint — SFT and GRPO both
   filter on `train_tasks`, and evaluating held-out generalisation on a task that leaked into
   training silently invalidates the eval.
+- This codebase is single-GPU only — no multi-GPU/data-parallel training path exists.
+  `training/backend.py::preimport()` pins `CUDA_VISIBLE_DEVICES=0` before the first CUDA
+  touch of the process because Unsloth otherwise auto-shards the model across every CUDA
+  device it can see (observed on Kaggle's two-GPU "T4 x2" accelerator: `lm_head`/
+  `embed_tokens` placed on `cuda:1` while the trainer's batch stayed on `cuda:0`, crashing
+  the first embedding lookup). A hardware profile that legitimately needs more than one GPU
+  visible would have to unset or override this, which is not currently supported.
 
 ## Tests
 
-102 tests total, CPU-only, no model loading (`tests/conftest.py` + 7 files covering reward
+105 tests total, CPU-only, no model loading (`tests/conftest.py` + 7 files covering reward
 functions, environment/tasks (incl. mitigation-gating), grader, a reward-ranking tripwire,
 dataset generation, config/hardware-profile resolution, and the backend seam).
-`test_backend.py` includes a source-level tripwire that `training/pipeline.py` calls
-`backend.preimport(config)` before `from trl import ...` — Unsloth patches trl at import
-time and, imported second, rewrites `SFTConfig`'s `eos_token` default to the placeholder
-`"<EOS_TOKEN>"`, which `SFTTrainer` rejects as out-of-vocabulary
-(unslothai/unsloth#2797). That failure only surfaces minutes into a GPU run.
+`test_backend.py` includes source-level tripwires that `training/pipeline.py` calls
+`backend.preimport(config)` before `from trl import ...`, and that `preimport()` pins
+`CUDA_VISIBLE_DEVICES` before `import unsloth` — Unsloth patches trl at import time and,
+imported second, rewrites `SFTConfig`'s `eos_token` default to the placeholder
+`"<EOS_TOKEN>"`, which `SFTTrainer` rejects as out-of-vocabulary (unslothai/unsloth#2797);
+and CUDA_VISIBLE_DEVICES has no effect once CUDA has already initialized in the process.
+Both failures only surfaced minutes into a real GPU run.
 `test_reward_ranking.py` hard-asserts the reward stack ranks a Q*-optimal
 action first in every training state — this is a structural property of `qstar_reward_func`
 (reward *is* the grader, maximised), not something tuned toward, so a regression here means the
