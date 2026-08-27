@@ -109,7 +109,8 @@ def test_real_config_amd_profile_is_bf16_transformers(monkeypatch):
 
 
 def test_real_config_kaggle_profile_matches_colab_settings(monkeypatch):
-    """Kaggle's T4/P100 is the same 16 GB VRAM class as Colab's T4."""
+    """Kaggle's T4 x2 is the same 16 GB VRAM class as Colab's T4 (P100 is unsupported
+    by the pinned PyTorch/Unsloth build -- sm_60 has no kernels)."""
     colab = TrainConfig.from_yaml(REAL_CONFIG)  # default profile, no env var set
     monkeypatch.setenv("HARDWARE_PROFILE", "kaggle_t4")
     kaggle = TrainConfig.from_yaml(REAL_CONFIG)

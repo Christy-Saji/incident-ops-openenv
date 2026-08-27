@@ -178,13 +178,24 @@ https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/
 ### Train on Kaggle Notebooks
 
 Upload [`kaggle_training.ipynb`](kaggle_training.ipynb) (File → Upload Notebook), then
-before running: open Notebook Settings (⋮ menu) → set **Accelerator** to `GPU T4 x2` or
-`GPU P100`, and flip **Internet** to `On`. Run all cells — it clones the repo into
-`/kaggle/working`, installs `pip install -e ".[train]"`, and trains on the `kaggle_t4`
-hardware profile (identical settings to Colab's T4). Unlike Colab, Kaggle has no
-Drive-style persistent mount: use **Save Version → Save & Run All (Commit)** to keep
-`/kaggle/working` past the session, or push the trained model to the HF Hub from the
-notebook's save cell (add an `HF_TOKEN` secret via Add-ons → Secrets first).
+before running: open Notebook Settings (⋮ menu) → set **Accelerator** to `GPU T4 x2`
+(**not** `GPU P100` — its sm_60 compute capability is too old for the current
+PyTorch/Unsloth build and model load crashes with `no kernel image is available for
+execution on the device`), and flip **Internet** to `On` (requires a phone-verified
+Kaggle account). Run all cells — it clones the repo into `/kaggle/working`, installs
+`pip install -e ".[train]"`, and trains on the `kaggle_t4` hardware profile (identical
+settings to Colab's T4).
+
+**No Internet / can't phone-verify?** The setup cell also takes an offline path: zip the
+project folder, upload it at kaggle.com/datasets as a new Dataset, then attach it to the
+notebook via **+ Add Input**. The cell auto-detects the attached dataset (any dataset
+containing `pyproject.toml` + `training/`) and copies it into `/kaggle/working` instead
+of cloning.
+
+Unlike Colab, Kaggle has no Drive-style persistent mount: use **Save Version → Save &
+Run All (Commit)** to keep `/kaggle/working` past the session, or push the trained model
+to the HF Hub from the notebook's save cell (add an `HF_TOKEN` secret via Add-ons →
+Secrets first).
 
 Or train locally (requires GPU with CUDA):
 

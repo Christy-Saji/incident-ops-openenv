@@ -1,17 +1,17 @@
 """Training backend seam — the one place a training backend is touched.
 
 The SFT → GRPO pipeline (``training/pipeline.py``) routes through this module for
-the two operations that are backend-specific: loading a LoRA-wrapped model +
-tokenizer, and saving the merged model. Everything else in the pipeline — dataset
-construction, reward functions, the TRL ``SFTTrainer``/``GRPOTrainer`` — is
-backend-agnostic and stays in ``pipeline.py``.
+the three operations that are backend-specific: importing the backend ahead of TRL,
+loading a LoRA-wrapped model + tokenizer, and saving the merged model. Everything else
+in the pipeline — dataset construction, reward functions, the TRL
+``SFTTrainer``/``GRPOTrainer`` — is backend-agnostic and stays in ``pipeline.py``.
 
 Why the seam exists
 -------------------
 Where training runs, which backend loads the model, and whether weights are 4-bit or
-bf16 are one coupled decision. Isolating it behind :func:`load_model` /
-:func:`save_model` means each provision is a self-contained branch here and the
-pipeline never changes. Two provisions are supported, selected by
+bf16 are one coupled decision. Isolating it behind :func:`preimport` /
+:func:`load_model` / :func:`save_model` means each provision is a self-contained branch
+here and the pipeline never changes. Two provisions are supported, selected by
 ``config.hardware.backend`` (set via a named profile in config/train.yaml):
 
 - ``unsloth``      — Google Colab / NVIDIA CUDA. Unsloth 4-bit (bitsandbytes),
@@ -38,6 +38,29 @@ from typing import TYPE_CHECKING, Any, Tuple
 
 if TYPE_CHECKING:
     from training.config import TrainConfig
+
+
+def preimport(config: "TrainConfig") -> None:
+    """Import the backend's own libraries before TRL/transformers are imported.
+
+    Unsloth patches ``transformers``, ``peft`` and ``trl`` at import time and expects
+    to be imported *first*. Importing it after ``trl`` leaves TRL half-patched: in
+    particular ``trl.SFTConfig``'s ``eos_token``/``pad_token`` dataclass defaults come
+    back rewritten to the literal placeholder string ``"<EOS_TOKEN>"``, which is in no
+    real vocabulary, so ``SFTTrainer.__init__`` dies with::
+
+        ValueError: The specified `eos_token` ('<EOS_TOKEN>') is not found in the
+        vocabulary of the given `processing_class` (Qwen2TokenizerFast).
+
+    (unslothai/unsloth#2797.) ``training/pipeline.py`` calls this before its own
+    ``from trl import ...`` so the ordering holds no matter who invoked the pipeline.
+    ``pipeline.py`` also pins the two tokens explicitly on ``SFTConfig``, so the run
+    survives even if a future Unsloth finds another way to clobber those defaults.
+
+    No-op for the ``transformers`` backend, which does no import-time patching.
+    """
+    if config.hardware.backend == "unsloth":
+        import unsloth  # noqa: F401  (imported for its import-time patches only)
 
 
 def load_model(config: "TrainConfig") -> Tuple[Any, Any]:

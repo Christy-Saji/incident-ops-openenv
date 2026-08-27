@@ -23,10 +23,18 @@ def run(config: "TrainConfig") -> None:
     All heavy imports (torch, unsloth, trl) are deferred here so that the
     training package can be imported on CPU-only machines (e.g. for tests).
     """
+    # backend.preimport MUST run before `from trl import ...`: the unsloth backend
+    # patches transformers/peft/trl at import time and expects to go first. Imported
+    # second, it rewrites trl.SFTConfig's eos_token/pad_token defaults to the
+    # placeholder "<EOS_TOKEN>" and SFTTrainer then rejects it as out-of-vocabulary
+    # (unslothai/unsloth#2797). See training/backend.py::preimport.
+    from training.backend import load_model, preimport, save_model
+
+    preimport(config)
+
     import torch
     from trl import GRPOConfig, GRPOTrainer, SFTConfig, SFTTrainer
 
-    from training.backend import load_model, save_model
     from training.callbacks import RewardLoggerCallback, WandbRewardCallback
     from training.dataset import generate_grpo_dataset, generate_sft_dataset
     from training.plot import plot_reward_components, plot_reward_curve
@@ -92,6 +100,14 @@ def run(config: "TrainConfig") -> None:
         max_length=config.hardware.max_seq_length,
         fp16=not torch.cuda.is_bf16_supported(),
         bf16=torch.cuda.is_bf16_supported(),
+        # Pin EOS/pad to the loaded tokenizer's own tokens. TRL defaults both to None,
+        # meaning "take them from the tokenizer" — which is what we want, but the
+        # unsloth backend has been seen to rewrite those defaults to the placeholder
+        # "<EOS_TOKEN>" (unslothai/unsloth#2797), and SFTTrainer then raises
+        # "The specified `eos_token` ('<EOS_TOKEN>') is not found in the vocabulary".
+        # backend.preimport() fixes the import order that triggers it; passing the real
+        # tokens here makes the pipeline immune regardless.
+        **_sft_token_kwargs(SFTConfig, tokenizer),
     )
 
     sft_trainer = SFTTrainer(
@@ -216,6 +232,24 @@ def run(config: "TrainConfig") -> None:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _sft_token_kwargs(sft_config_cls, tokenizer) -> dict:
+    """EOS/pad overrides for ``SFTConfig``, skipping fields the installed TRL lacks.
+
+    ``eos_token`` and ``pad_token`` are recent ``SFTConfig`` fields and pyproject.toml
+    admits ``trl>=0.18.2``; passing a keyword the dataclass does not declare is a
+    TypeError, so gate each one on the installed version actually having it.
+    """
+    import dataclasses
+
+    fields = {f.name for f in dataclasses.fields(sft_config_cls)}
+    kwargs = {}
+    if "eos_token" in fields:
+        kwargs["eos_token"] = tokenizer.eos_token
+    if "pad_token" in fields:
+        kwargs["pad_token"] = tokenizer.pad_token or tokenizer.eos_token
+    return kwargs
+
 
 def _assert_prompts_fit(
     dataset,

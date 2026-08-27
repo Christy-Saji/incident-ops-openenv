@@ -29,11 +29,12 @@ pip install -e ".[train]"        # + unsloth/trl/transformers/torch (GPU require
 # Lint (matches CI exactly)
 ruff check . --select=E,F,W,I --ignore=E501
 
-# Tests (CPU only, no GPU/model loading — this is what CI runs, in 4 groups)
+# Tests (CPU only, no GPU/model loading — this is what CI runs, in 5 groups)
 pytest tests/test_environment.py tests/test_grader.py -v --tb=short -rxX
 pytest tests/test_reward_functions.py -v --tb=short -rxX -k "TestExtractAction or TestFormatReward or TestAntiCheatReward or TestDiversityReward or TestBatchConsistency"
 pytest tests/test_reward_ranking.py -v --tb=short -rxX   # hard assert: reward argmax is Q*-optimal in every training state
 pytest tests/test_dataset.py -v --tb=short -rxX          # GRPO dataset size, SFT/GRPO disjointness, held-out tasks
+pytest tests/test_config.py tests/test_backend.py -v --tb=short -rxX   # hardware-profile + backend seam (incl. unsloth-before-trl import order)
 
 # Regenerate optimal_actions from the Q* solver after any change to env dynamics / MITIGATION_PREREQS / task config
 python scripts/derive_optimal.py --write
@@ -133,9 +134,15 @@ over `[0, 1]`, used both as the terminal env score and as the delta source for s
 
 ## Tests
 
-83 tests total, CPU-only, no model loading (`tests/conftest.py` + 5 files covering reward
-functions, environment/tasks (incl. mitigation-gating), grader, a reward-ranking tripwire, and
-dataset generation). `test_reward_ranking.py` hard-asserts the reward stack ranks a Q*-optimal
+102 tests total, CPU-only, no model loading (`tests/conftest.py` + 7 files covering reward
+functions, environment/tasks (incl. mitigation-gating), grader, a reward-ranking tripwire,
+dataset generation, config/hardware-profile resolution, and the backend seam).
+`test_backend.py` includes a source-level tripwire that `training/pipeline.py` calls
+`backend.preimport(config)` before `from trl import ...` — Unsloth patches trl at import
+time and, imported second, rewrites `SFTConfig`'s `eos_token` default to the placeholder
+`"<EOS_TOKEN>"`, which `SFTTrainer` rejects as out-of-vocabulary
+(unslothai/unsloth#2797). That failure only surfaces minutes into a GPU run.
+`test_reward_ranking.py` hard-asserts the reward stack ranks a Q*-optimal
 action first in every training state — this is a structural property of `qstar_reward_func`
 (reward *is* the grader, maximised), not something tuned toward, so a regression here means the
 bug is in `training/qstar.py` or in how a reward stack composes it, not in the test.

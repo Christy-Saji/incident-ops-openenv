@@ -98,8 +98,11 @@ hardware:
       num_generations: 8
       per_device_train_batch_size: 2
       gradient_accumulation_steps: 4
-    # Kaggle Notebooks — GPU T4 x2 or P100 accelerator, both 16 GB VRAM (single-GPU
-    # use; this codebase doesn't do multi-GPU, so a T4 x2 selection just uses GPU 0).
+    # Kaggle Notebooks — GPU T4 x2 accelerator, 16 GB VRAM (single-GPU use; this
+    # codebase doesn't do multi-GPU, so a T4 x2 selection just uses GPU 0). NOT P100:
+    # its sm_60 compute capability is below what the pinned PyTorch/Unsloth build ships
+    # kernels for, so model load fails with "no kernel image is available for execution
+    # on the device" (the notebook's GPU-check cell rejects it up front).
     # Same VRAM class as Colab's T4, so identical batch/seq/generation settings apply
     # -- kept as its own named profile (not an alias) so it can diverge later without
     # touching colab_t4, and so logs/summaries correctly say where it ran.
