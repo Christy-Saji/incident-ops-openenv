@@ -41,7 +41,8 @@ if TYPE_CHECKING:
 
 
 def preimport(config: "TrainConfig") -> None:
-    """Import the backend's own libraries before TRL/transformers are imported.
+    """Import the backend's own libraries before TRL/transformers are imported, and
+    pin CUDA visibility to a single GPU before anything touches CUDA at all.
 
     Unsloth patches ``transformers``, ``peft`` and ``trl`` at import time and expects
     to be imported *first*. Importing it after ``trl`` leaves TRL half-patched: in
@@ -57,10 +58,42 @@ def preimport(config: "TrainConfig") -> None:
     ``pipeline.py`` also pins the two tokens explicitly on ``SFTConfig``, so the run
     survives even if a future Unsloth finds another way to clobber those defaults.
 
-    No-op for the ``transformers`` backend, which does no import-time patching.
+    Separately: this codebase is single-GPU only by design (config/train.yaml's
+    ``kaggle_t4`` profile comment says a "GPU T4 x2" accelerator "just uses GPU 0"),
+    but that assumption used to hold only because Unsloth/accelerate happened not to
+    look past device 0. Current Unsloth auto-shards the model across *every* CUDA
+    device visible in the process once more than one is present — observed on Kaggle's
+    two-GPU T4 accelerator as ``lm_head``/``embed_tokens`` pinned to ``cuda:1`` while
+    the trainer's input batch stays on ``cuda:0``, crashing the first embedding lookup
+    with::
+
+        RuntimeError: Expected all tensors to be on the same device, but got index is
+        on cuda:0, different from other tensors on cuda:1
+
+    Restricting ``CUDA_VISIBLE_DEVICES`` to GPU 0 makes only one device visible to the
+    process at all, so there is nothing left for Unsloth to shard across. This has to
+    happen before CUDA initializes in this process — which, since nothing earlier in
+    the pipeline touches ``torch``, means before the ``import unsloth`` call below.
+    ``setdefault`` (in :func:`_pin_single_gpu`) leaves an explicit operator choice
+    (e.g. a multi-GPU config run outside this project's supported profiles) untouched.
+
+    No-op for the ``transformers`` backend, which does no import-time patching and
+    (per its own hardware profile, ``amd_mi300x``) targets a single card already.
     """
     if config.hardware.backend == "unsloth":
+        _pin_single_gpu()
         import unsloth  # noqa: F401  (imported for its import-time patches only)
+
+
+def _pin_single_gpu() -> None:
+    """Restrict CUDA visibility to GPU 0 unless the operator already chose otherwise.
+
+    Split out from :func:`preimport` so it's testable without importing (and, on a
+    CPU-only machine, without segfaulting on) ``unsloth`` itself.
+    """
+    import os
+
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
 
 
 def load_model(config: "TrainConfig") -> Tuple[Any, Any]:

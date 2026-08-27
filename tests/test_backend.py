@@ -1,12 +1,19 @@
-"""Tests for the backend seam's import-ordering guard and SFT token overrides.
+"""Tests for the backend seam's import-ordering guard, single-GPU pin, and SFT token
+overrides.
 
-CPU-only: nothing here imports torch, unsloth or trl. What it protects is the
-ordering constraint that killed a Kaggle run — Unsloth patches transformers/peft/trl
-at import time and must be imported *before* them. Imported second, it rewrote
-``trl.SFTConfig``'s ``eos_token`` default to the placeholder ``"<EOS_TOKEN>"`` and
-``SFTTrainer`` rejected it as out-of-vocabulary (unslothai/unsloth#2797). The failure
-only shows up on a GPU box several minutes into a run, so it is worth a source-level
-tripwire here. See training/backend.py::preimport and training/pipeline.py.
+CPU-only: nothing here imports torch, unsloth or trl. What it protects is two Kaggle
+failures that only surfaced minutes into a real GPU run:
+
+- Import ordering — Unsloth patches transformers/peft/trl at import time and must be
+  imported *before* them. Imported second, it rewrote ``trl.SFTConfig``'s
+  ``eos_token`` default to the placeholder ``"<EOS_TOKEN>"`` and ``SFTTrainer``
+  rejected it as out-of-vocabulary (unslothai/unsloth#2797).
+- Multi-GPU auto-sharding — on Kaggle's two-GPU "T4 x2" accelerator, Unsloth spread
+  the model across both visible CUDA devices even though this codebase is single-GPU
+  only by design, and the first embedding lookup crashed with "Expected all tensors
+  to be on the same device".
+
+See training/backend.py::preimport / ::_pin_single_gpu and training/pipeline.py.
 """
 
 from __future__ import annotations
@@ -14,7 +21,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 
-from training.backend import preimport
+from training.backend import _pin_single_gpu, preimport
 from training.config import TrainConfig
 from training.pipeline import _sft_token_kwargs
 
@@ -38,6 +45,35 @@ def test_preimport_precedes_the_trl_import_in_the_pipeline():
         "backend.preimport(config) must be called BEFORE `from trl import ...` — "
         "importing unsloth after trl corrupts SFTConfig's eos_token default "
         "(unslothai/unsloth#2797)."
+    )
+
+
+def test_pin_single_gpu_defaults_cuda_visible_devices_to_gpu_0(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    _pin_single_gpu()
+    import os
+
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
+
+
+def test_pin_single_gpu_does_not_override_an_explicit_operator_choice(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1,2")
+    _pin_single_gpu()
+    import os
+
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "1,2"
+
+
+def test_preimport_pins_single_gpu_before_importing_unsloth():
+    """Ordering tripwire: the CUDA_VISIBLE_DEVICES pin must land before `import unsloth`
+    — CUDA visibility can't be restricted after the process has already touched CUDA."""
+    # Match the real import statement's trailing noqa comment, not its own docstring's
+    # prose mention of "import unsloth", which precedes _pin_single_gpu() in the text.
+    src = inspect.getsource(preimport)
+    assert "_pin_single_gpu()" in src
+    assert src.index("_pin_single_gpu()") < src.index("import unsloth  # noqa"), (
+        "_pin_single_gpu() must be called BEFORE `import unsloth` — CUDA_VISIBLE_DEVICES "
+        "has no effect once CUDA has already initialized in this process."
     )
 
 
