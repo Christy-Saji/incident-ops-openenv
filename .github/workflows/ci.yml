@@ -50,6 +50,11 @@ jobs:
         run: |
           pytest tests/test_dataset.py -v --tb=short -rxX
 
+      # Config + hardware-profile seam (Colab/Unsloth vs AMD/transformers selection).
+      - name: Config + hardware-profile tests
+        run: |
+          pytest tests/test_config.py -v --tb=short -rxX
+
   docker:
     name: Docker Build + Smoke Test
     runs-on: ubuntu-latest

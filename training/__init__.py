@@ -2,6 +2,7 @@
 
 Submodules:
   config           — TrainConfig dataclass and YAML loader
+  backend          — load_model/save_model seam isolating the training backend (Unsloth)
   reward_functions — All 9 GRPO reward signal functions
   dataset          — SFT warm-start and GRPO curriculum dataset builders
   callbacks        — RewardLoggerCallback for per-step CSV logging

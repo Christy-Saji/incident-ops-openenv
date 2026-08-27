@@ -1,31 +1,33 @@
 # Incident Ops OpenEnv — Training Configuration
 # Edit this file to change training behaviour.
 # All values can also be overridden via environment variables (see training/config.py).
+#
+# The file is split into two halves:
+#
+#   LOCKED  — algorithm knobs (model + training). Settled; not re-opened when the
+#             hardware/backend decision is made.
+#   HARDWARE PROFILE — deferred. Where training runs, which backend loads the model
+#             (Unsloth vs stock transformers+peft), and 4-bit vs bf16 are ONE coupled
+#             decision made later. When it lands it edits ONLY the `hardware:` block
+#             below and training/backend.py — nothing else.
 
 experiment_name: "grpo_run_v1"
 seed: 42
 
+# ===========================================================================
+# LOCKED — algorithm knobs (do not retune when choosing hardware)
+# ===========================================================================
+
 model:
-  # Model options for Colab T4 (16 GB VRAM) — sorted by quality:
-  #
-  #   unsloth/Qwen2.5-3B-Instruct     best choice — 2x better reasoning vs 1.5B,
-  #                                   ~60-75 min GRPO, safe on T4 with 8 gens  ← CURRENT
-  #
-  #   unsloth/Llama-3.2-3B-Instruct   good alternative if you prefer Meta/Llama
-  #                                   ~65-80 min, similar quality to Qwen 3B
-  #
-  #   unsloth/Qwen2.5-1.5B-Instruct   faster (~45 min) but weaker on hard/network tasks
-  #
-  #   unsloth/Qwen2.5-7B-Instruct     DO NOT use with num_generations=8 → OOM
-  #                                   only works with num_generations=4 + batch_size=1
+  # Base model + LoRA geometry. Model choice is settled: Qwen2.5-3B-Instruct.
+  # (4-bit vs bf16 loading is a hardware-profile concern — see `hardware:` below.)
   id: "unsloth/Qwen2.5-3B-Instruct"
   lora_rank: 32
   # alpha = 2*rank is the convention. This was 16 against rank 32,
   # giving alpha/r = 0.5 scaling — a quarter of the intended LoRA update.
   lora_alpha: 64
-  # Must be >= max_prompt_length + max_completion_length (asserted in pipeline.py)
-  max_seq_length: 1280
-  load_in_4bit: true
+  # LoRA adapters on attention (q,k,v,o) + MLP (gate,up,down) projections.
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
   # Set push_to_hub: true and HF_TOKEN in Colab secrets to auto-upload after training
   push_to_hub: false
@@ -44,13 +46,10 @@ training:
   epsilon: 0.3
   n_states: 1000
 
-  # Hardware settings tuned for Colab T4 (16 GB VRAM)
-  per_device_train_batch_size: 2
-  gradient_accumulation_steps: 4
-  num_generations: 8
-  # Prompts are ~700 tokens median / ~900 max. At 512 TRL LEFT-truncated them,
-  # silently deleting the system prompt and the head of the observation JSON
-  # for the entire first training run. pipeline.py now asserts this fits.
+  # Prompt budget. Prompts are ~700 tokens median / ~900 max. At 512 TRL
+  # LEFT-truncated them, silently deleting the system prompt and the head of the
+  # observation JSON for the entire first training run. pipeline.py now asserts
+  # that hardware.max_seq_length >= max_prompt_length + max_completion_length.
   max_prompt_length: 1024
   max_completion_length: 32
 
@@ -73,6 +72,43 @@ training:
   # Checkpoint resumption — save every N steps so Colab disconnects don't lose progress
   save_steps: 50
   save_total_limit: 3
+
+# ===========================================================================
+# HARDWARE PROFILE — deferred (backend + device + precision)
+# ===========================================================================
+# Both training provisions are kept side by side as named profiles. Switch between
+# them with the `profile:` selector below, or without editing the file via the
+# HARDWARE_PROFILE env var (e.g. `HARDWARE_PROFILE=amd_mi300x python train.py`).
+# The backend seam (training/backend.py) dispatches on each profile's `backend`.
+#
+# TRL constraint when retuning: the global batch
+# (per_device_train_batch_size * gradient_accumulation_steps * num_gpus) must be
+# divisible by num_generations. max_seq_length must be >= max_prompt_length +
+# max_completion_length (asserted in pipeline.py).
+hardware:
+  profile: colab_t4          # active profile: colab_t4 | amd_mi300x
+  profiles:
+    # Google Colab T4 (16 GB VRAM) — Unsloth 4-bit (bitsandbytes). Model choices on T4:
+    #   Qwen2.5-3B (current) ~60-75 min GRPO; 1.5B ~45 min but weaker on hard/network;
+    #   7B OOMs at 8 generations. global batch 2*4=8, divisible by num_generations 8.
+    colab_t4:
+      backend: unsloth
+      load_in_4bit: true
+      max_seq_length: 1280
+      num_generations: 8
+      per_device_train_batch_size: 2
+      gradient_accumulation_steps: 4
+    # AMD Developer Cloud — single MI300X (192 GB HBM3, 20 vCPU, 240 GB RAM) in the
+    # rocm/pytorch-training container. Stock transformers + peft + TRL in bf16 (no
+    # Unsloth, no bitsandbytes). 192 GB is ~12x a T4, so rollouts and batch scale up.
+    # global batch 8*4=32, divisible by num_generations 16.
+    amd_mi300x:
+      backend: transformers
+      load_in_4bit: false      # bf16 — bitsandbytes 4-bit is unreliable on ROCm
+      max_seq_length: 1280
+      num_generations: 16
+      per_device_train_batch_size: 8
+      gradient_accumulation_steps: 4
 
 output:
   dir: "outputs"

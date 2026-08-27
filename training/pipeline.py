@@ -25,8 +25,8 @@ def run(config: "TrainConfig") -> None:
     """
     import torch
     from trl import GRPOConfig, GRPOTrainer, SFTConfig, SFTTrainer
-    from unsloth import FastLanguageModel, PatchDPOTrainer
 
+    from training.backend import load_model, save_model
     from training.callbacks import RewardLoggerCallback, WandbRewardCallback
     from training.dataset import generate_grpo_dataset, generate_sft_dataset
     from training.plot import plot_reward_components, plot_reward_curve
@@ -46,7 +46,7 @@ def run(config: "TrainConfig") -> None:
                     "model_id":       config.model.id,
                     "lora_rank":      config.model.lora_rank,
                     "grpo_max_steps": config.training.grpo_max_steps,
-                    "num_generations":config.training.num_generations,
+                    "num_generations":config.hardware.num_generations,
                     "train_tasks":    config.training.train_tasks,
                     "n_states":       config.training.n_states,
                     "epsilon":        config.training.epsilon,
@@ -59,26 +59,12 @@ def run(config: "TrainConfig") -> None:
             config.wandb.enabled = False
 
     # ------------------------------------------------------------------
-    # 1. Load base model with Unsloth
+    # 1. Load base model + LoRA adapter via the backend seam
     # ------------------------------------------------------------------
+    # training/backend.py is the only module that touches the backend (Unsloth
+    # today). Choosing a different backend/precision later is a swap there, not here.
     print("\n[1] Loading base model:", config.model.id)
-    PatchDPOTrainer()
-
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=config.model.id,
-        max_seq_length=config.model.max_seq_length,
-        dtype=None,
-        load_in_4bit=config.model.load_in_4bit,
-    )
-
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=config.model.lora_rank,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"],
-        lora_alpha=config.model.lora_alpha,
-        use_gradient_checkpointing="unsloth",
-    )
+    model, tokenizer = load_model(config)
 
     # ------------------------------------------------------------------
     # 2. Phase 1 — SFT warm-start
@@ -103,7 +89,7 @@ def run(config: "TrainConfig") -> None:
         lr_scheduler_type="cosine",
         logging_steps=1,
         dataset_text_field="text",
-        max_length=config.model.max_seq_length,
+        max_length=config.hardware.max_seq_length,
         fp16=not torch.cuda.is_bf16_supported(),
         bf16=torch.cuda.is_bf16_supported(),
     )
@@ -132,7 +118,7 @@ def run(config: "TrainConfig") -> None:
         grpo_dataset,
         tokenizer,
         config.training.max_prompt_length,
-        config.model.max_seq_length,
+        config.hardware.max_seq_length,
         config.training.max_completion_length,
     )
 
@@ -142,11 +128,11 @@ def run(config: "TrainConfig") -> None:
         lr_scheduler_type=config.training.lr_scheduler_type,
         warmup_steps=config.training.warmup_steps,
         max_steps=config.training.grpo_max_steps,
-        per_device_train_batch_size=config.training.per_device_train_batch_size,
-        gradient_accumulation_steps=config.training.gradient_accumulation_steps,
+        per_device_train_batch_size=config.hardware.per_device_train_batch_size,
+        gradient_accumulation_steps=config.hardware.gradient_accumulation_steps,
         logging_steps=1,
         max_grad_norm=config.training.max_grad_norm,
-        num_generations=config.training.num_generations,
+        num_generations=config.hardware.num_generations,
         max_prompt_length=config.training.max_prompt_length,
         max_completion_length=config.training.max_completion_length,
         temperature=config.training.temperature,
@@ -182,14 +168,10 @@ def run(config: "TrainConfig") -> None:
     print("  GRPO training complete.")
 
     # ------------------------------------------------------------------
-    # 4. Save merged model
+    # 4. Save merged model via the backend seam
     # ------------------------------------------------------------------
     print(f"\n[4] Saving merged model to {config.output.model_path}...")
-    model.save_pretrained_merged(
-        config.output.model_path,
-        tokenizer,
-        save_method="merged_16bit",
-    )
+    save_model(config, model, tokenizer, config.output.model_path)
 
     # ------------------------------------------------------------------
     # 5. Push to HuggingFace Hub (optional)
@@ -272,7 +254,7 @@ def _assert_prompts_fit(
             f"but max_prompt_length is {max_prompt_length}. TRL would LEFT-truncate this, "
             f"silently removing the system prompt and the start of the observation.\n"
             f"Fix by raising training.max_prompt_length in config/train.yaml (and "
-            f"model.max_seq_length with it), or by trimming the observation in "
+            f"hardware.max_seq_length with it), or by trimming the observation in "
             f"training/prompting.py:PROMPT_EXCLUDED_OBS_KEYS.\n"
             f"Longest prompt began: {longest_text[:200]!r}"
         )
@@ -281,7 +263,7 @@ def _assert_prompts_fit(
         raise ValueError(
             f"max_prompt_length ({max_prompt_length}) + max_completion_length "
             f"({max_completion_length}) = {max_prompt_length + max_completion_length} "
-            f"exceeds model.max_seq_length ({max_seq_length})."
+            f"exceeds hardware.max_seq_length ({max_seq_length})."
         )
 
 
