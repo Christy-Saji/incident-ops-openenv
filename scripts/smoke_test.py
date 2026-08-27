@@ -34,10 +34,11 @@ print("1. reward_functions imports")
 check("3-func imports work", True)
 check(
     # Tier 1 Phase B: qstar_reward_func replaced the 9 hand-tuned signals as
-    # the primary training stack (format + qstar + diversity). See
-    # LEGACY_REWARD_FUNCTIONS for the retired 7.
-    "ALL_REWARD_FUNCTIONS is the Tier-1 Q* stack (format+qstar+diversity)",
-    len(ALL_REWARD_FUNCTIONS) == 3,
+    # the primary training stack. See LEGACY_REWARD_FUNCTIONS for the retired 7.
+    # diversity_reward_func was a third member until the first full 500-step run
+    # showed it ranking unanimous Q*-optimal play below diverse wrong play.
+    "ALL_REWARD_FUNCTIONS is the Tier-1 Q* stack (format+qstar)",
+    len(ALL_REWARD_FUNCTIONS) == 2,
     f"len={len(ALL_REWARD_FUNCTIONS)}",
 )
 

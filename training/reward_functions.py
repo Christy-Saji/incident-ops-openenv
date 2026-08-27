@@ -9,9 +9,18 @@ maximised -- alignment with compute_score is structural rather than
 something to tune toward. See docs/prompts/tier1.md.
 
 Active stack (ALL_REWARD_FUNCTIONS / CORE_REWARD_FUNCTIONS):
-  format_reward_func   — valid action string check
+  format_reward_func   — bare valid action string check (+0.1 / 0.0 / -0.4)
   qstar_reward_func    — primary signal: Q*(s,a) - max_a' Q*(s,a')
-  diversity_reward_func— penalise GRPO group-level mode collapse
+
+Both are <= their ceiling by construction and the stack tops out at +0.1, so a
+healthy GRPO run has a NEGATIVE logged reward rising toward +0.1. Read
+rewards/qstar_reward_func/mean (target 0.0) as the measure of policy quality;
+the total is not on a 0-1 scale and never was.
+
+diversity_reward_func was a third member of this stack for one full 500-step
+run and has been retired -- it pays for entropy without reference to
+correctness and ranks unanimous optimal play below diverse wrong play. It is
+kept importable and tested; see its docstring.
 
 The original 7 (LEGACY_REWARD_FUNCTIONS) are retained, individually tested,
 but no longer wired into training -- see that constant's docstring below.
@@ -116,18 +125,54 @@ _MIT_ACTIONS = {
 # 1. Format reward
 # ---------------------------------------------------------------------------
 
-def format_reward_func(prompts, completions, **kwargs) -> List[float]:
-    """Reward 1: Did the model output a single valid action string?
+# Decoration stripped from the ends of a completion before asking whether it is a
+# *bare* action: backticks, quotes, markdown emphasis, trailing punctuation.
+_BARE_DECORATION = " \t\n\r`\"'*.:"
 
-    Reduced from 1.0 → 0.1 so this baseline signal no longer dominates
-    the task-specific rewards. The model has a real incentive to explore
-    diagnostic / mitigation actions rather than just any valid action.
+
+def format_reward_func(prompts, completions, **kwargs) -> List[float]:
+    """Reward 1: Did the model output a single BARE valid action string?
+
+    Three tiers, not two:
+
+        +0.1  the completion IS the action, modulo surrounding decoration
+         0.0  a valid action is in there, but padded with prose
+        -0.4  no valid action at all
+
+    Reduced from 1.0 → 0.1 so this baseline signal no longer dominates the
+    task-specific rewards.
+
+    Why the middle tier exists. The earlier two-tier version paid +0.1 for any
+    completion ``extract_action`` could find an action in *anywhere*, and both
+    consequences were visible in the 500-step run:
+
+      1. It never varied within a GRPO group — logged mean 0.100000 with
+         std 0.000000 on ~90% of steps. GRPO's advantage is
+         ``(r_i - group_mean) / group_std``, so a reward that is uniform across
+         a group contributes exactly ZERO to every gradient in it. The signal
+         was decorative; the effective stack was one function short of what it
+         looked like.
+      2. Because ``extract_action`` regex-searches the whole string, a 32-token
+         ramble that happened to contain a valid action name scored the same
+         +0.1 as a clean one-token answer. Nothing anywhere in the stack
+         penalised length, and from ~step 320 the policy drifted into rambling
+         until every rollout hit ``max_completion_length`` having never emitted
+         EOS at all (clipped_ratio 1.0, mean_terminated_length 0.0).
+
+    Ranking the bare answer above the padded one addresses both: it varies
+    within a group whenever some rollouts are clean and some are not, so it
+    survives the group-mean baseline, and it puts real pressure back on brevity.
     """
     rewards = []
     for completion in completions:
-        text = completion[0]["content"]
+        text = completion[0]["content"] or ""
         action = extract_action(text)
-        rewards.append(0.1 if action in VALID_ACTIONS else -0.4)
+        if action not in VALID_ACTIONS:
+            rewards.append(-0.4)
+        elif text.lower().strip(_BARE_DECORATION) == action:
+            rewards.append(0.1)
+        else:
+            rewards.append(0.0)
     return rewards
 
 
@@ -566,7 +611,40 @@ def qstar_reward_func(prompts, completions, **kwargs) -> List[float]:
 # ---------------------------------------------------------------------------
 
 def diversity_reward_func(prompts, completions, **kwargs) -> List[float]:
-    """Reward 9: Penalise GRPO group-level mode collapse.
+    """Reward 9: Penalise GRPO group-level mode collapse. **RETIRED — do not
+    put this back in a training stack.**
+
+    It was removed from ALL_REWARD_FUNCTIONS after the first full 500-step GRPO
+    run, because it pays for entropy without reference to correctness and so
+    fights qstar_reward_func directly.
+
+    The arithmetic. A group of 8 rollouts that all emit the SAME Q*-optimal
+    action scores 0.1 (format) + 0.0 (qstar) - 0.5 (this) = **-0.4** — that is
+    perfect play, scored at the bottom of the range. A group that spreads over 8
+    different actions, most of them wrong, scores around 0.1 + -0.2 + 0.0 =
+    -0.1. Same state, worse play, +0.3 more reward. Step 1 of the run logged
+    exactly this: qstar 0.000000 / std 0.000000, diversity -0.500000, total
+    -0.400000. Steps 15, 23, 31, 33, 43, 71, 87 and 93 are identical.
+
+    Its gradient points at whichever action is *rarest in the group*, which is
+    independent of whether that action is any good, and its within-group spread
+    was comparable to qstar's for most of the run. Windowed over that run,
+    total reward improved from about -0.46 (steps 1-50) to -0.16 (steps
+    451-500), but qstar — the only term that measures policy quality — moved
+    only -0.21 → -0.155. Roughly 70% of the apparent improvement was the model
+    learning to sample more randomly, and under 20% was it getting better at
+    the task.
+
+    Collapse onto the *correct* action is the goal, not a pathology. Collapse
+    onto a wrong action does produce a zero-variance group and hence no
+    gradient, which is the real hazard this was meant to address — but the
+    remedies for that are the sampling temperature, num_generations, and the
+    eps-greedy state spread, not a reward that pays for disagreement. Detect it
+    via the reward_std column logged by RewardLoggerCallback.
+
+    Kept importable and unit-tested for the record and for ablation.
+
+    Below: why, given that it *was* wired in, it had to be per-completion.
 
     IMPORTANT — why this is per-completion and must stay that way:
 
@@ -616,17 +694,28 @@ def diversity_reward_func(prompts, completions, **kwargs) -> List[float]:
 # Convenience list — import this in pipeline.py
 # ---------------------------------------------------------------------------
 
-# Tier 1, Phase B: qstar_reward_func is now the primary training signal.
-# format_reward_func (malformed-output guard) and diversity_reward_func
-# (per-completion anti-collapse) are kept alongside it because neither
-# overlaps with Q* -- one polices output syntax, the other polices GRPO
-# group-level mode collapse, and both stay ~0 on a well-formed, diverse batch.
+# Tier 1, Phase B: qstar_reward_func is the primary training signal.
+# format_reward_func rides alongside it as a malformed-output / brevity guard;
+# it does not overlap with Q* (it polices output syntax, not action choice) and
+# it stays at its +0.1 ceiling on a well-formed batch.
+#
+# diversity_reward_func was the third member here for the first full 500-step
+# run and has been REMOVED -- it pays for entropy regardless of correctness, so
+# it scores a group that unanimously plays the Q*-optimal action (-0.4) below
+# one that spreads over eight mostly-wrong actions (~-0.1). See that function's
+# docstring for the numbers. Anything added to this list from here must be
+# per-completion in the strict sense: a completion's reward may not depend on
+# its siblings. tests/test_reward_ranking.py asserts that.
+#
+# The stack's ceiling is +0.1 (format 0.1 + qstar 0.0). qstar_reward_func is
+# <= 0 by construction, so a healthy run shows the LOGGED REWARD RISING TOWARD
+# +0.1, never above it, and rewards/qstar_reward_func/mean approaching 0.0 --
+# that column, not the total, is the measure of policy quality.
 #
 # Used by training/pipeline.py.
 ALL_REWARD_FUNCTIONS = [
     format_reward_func,
     qstar_reward_func,
-    diversity_reward_func,
 ]
 
 # The reduced set used by colab_training.ipynb: Q* alone, no format/diversity

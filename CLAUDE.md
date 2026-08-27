@@ -102,12 +102,15 @@ ops console (simulate / results / leaderboard).
   `epsilon` of a random action from `qstar.relevant_actions(task)` instead of the Q*-optimal one)
   that expands the GRPO prompt set well beyond what SFT already memorised, with zero state
   overlap between the two by construction and `memory_leak`/`disk_full` excluded from both
-- `reward_functions.py` — `ALL_REWARD_FUNCTIONS` = format + `qstar_reward_func` (primary signal:
-  `Q*(s,a) - max_a' Q*(s,a')`) + diversity; the original 9 hand-tuned functions are retired to
-  `LEGACY_REWARD_FUNCTIONS` (kept importable/tested for ablation, not wired into training).
-  `diversity_reward` is deliberately scored *per completion* rather than per group, since a
-  reward uniform across a GRPO group is cancelled by the group-mean baseline and produces no
-  gradient
+- `reward_functions.py` — `ALL_REWARD_FUNCTIONS` = `format_reward_func` + `qstar_reward_func`
+  (primary signal: `Q*(s,a) - max_a' Q*(s,a')`); the original 9 hand-tuned functions are retired
+  to `LEGACY_REWARD_FUNCTIONS` (kept importable/tested for ablation, not wired into training).
+  **The stack's ceiling is `+0.1`** (format `0.1` + qstar `0.0`), so a healthy GRPO run has a
+  negative logged reward rising toward `+0.1` — read `rewards/qstar_reward_func/mean` (target
+  `0.0`) as the measure of policy quality, not the total. Every reward here must be strictly
+  per-completion: a completion's score may not depend on its siblings (asserted by
+  `test_rewards_are_independent_of_sibling_completions`). `diversity_reward_func` violated that
+  and is retired — see the next section
 - `prompting.py` — `SYSTEM_PROMPT` + `build_prompt`, shared by training, `scripts/evaluate.py`,
   and `compare_inference.py` so prompt format never drifts between train and eval
 - `pipeline.py` — the SFT→GRPO loop; asserts at startup that the longest training prompt fits
@@ -125,8 +128,22 @@ over `[0, 1]`, used both as the terminal env score and as the delta source for s
   is scaled by 0.5.
 - `max_prompt_length` (1024) must exceed the ~700-token median prompt with margin; TRL
   left-truncates silently past this, which removes the system prompt.
-- `kl_coef` (0.005, TRL's `beta`) — 0.04 was found to over-anchor the policy to the SFT
-  reference and suppress learning.
+- `kl_coef` (0.02, TRL's `beta`) is bracketed from both sides — 0.04 over-anchors the policy to
+  the SFT reference and suppresses learning; 0.005 under-anchors just as badly. The first full
+  500-step run logged sustained KL of 1–4 nats with spikes past 13, where a 0.005 penalty is a
+  rounding error against a reward range of 0.5, and the policy drifted off the SFT reference's
+  clean single-token output into rambling to the token cap.
+- `global batch / num_generations` is the number of distinct **prompts** behind each optimiser
+  step, and it must be > 1. At `2*4=8` with 8 generations it was 1 — every gradient step
+  estimated from eight rollouts of a single state. The T4 profiles now use
+  `gradient_accumulation_steps: 8` for a quotient of 2 (same peak VRAM, ~2x wall clock:
+  500 steps goes from ~1h40m to ~3h25m). Halving `num_generations` instead gets the same
+  quotient at the old wall clock but a noisier group-mean baseline.
+- Lesson from that run, worth generalising: **a reward that is uniform across a GRPO group is
+  invisible.** The advantage is `(r_i - group_mean) / group_std`, so any term with no
+  within-group variance contributes exactly zero to every gradient. `format_reward_func` logged
+  mean `0.100000` / std `0.000000` on ~90% of steps and was purely decorative until it was given
+  a middle tier for prose-padded answers.
 - `max_seq_length` must fit `max_prompt_length + max_completion_length`.
 - `train_tasks`/`eval_tasks` in `config/train.yaml` must stay disjoint — SFT and GRPO both
   filter on `train_tasks`, and evaluating held-out generalisation on a task that leaked into
@@ -141,7 +158,7 @@ over `[0, 1]`, used both as the terminal env score and as the delta source for s
 
 ## Tests
 
-105 tests total, CPU-only, no model loading (`tests/conftest.py` + 7 files covering reward
+116 tests total, CPU-only, no model loading (`tests/conftest.py` + 7 files covering reward
 functions, environment/tasks (incl. mitigation-gating), grader, a reward-ranking tripwire,
 dataset generation, config/hardware-profile resolution, and the backend seam).
 `test_backend.py` includes source-level tripwires that `training/pipeline.py` calls
@@ -155,5 +172,12 @@ Both failures only surfaced minutes into a real GPU run.
 action first in every training state — this is a structural property of `qstar_reward_func`
 (reward *is* the grader, maximised), not something tuned toward, so a regression here means the
 bug is in `training/qstar.py` or in how a reward stack composes it, not in the test.
+Its ranking tests score one batch of 19 *distinct* actions, which makes them structurally blind
+to a group-relative reward: such a term is constant across that batch and can never move the
+argmax. `diversity_reward_func` was exactly that shape and shipped through a full 500-step run
+with this file green while, in real training, ranking a unanimously Q*-optimal group below a
+diverse wrong one. `test_rewards_are_independent_of_sibling_completions` is the guard for that
+class of bug — scoring an action alone must equal scoring it among identical siblings. Do not
+add a reward function that fails it.
 
 When making multiple related code changes, do not run tests after each individual edit. Batch all planned changes first, then run the full test suite once at the end. Only run a targeted test immediately if a change is high-risk or isolated.
