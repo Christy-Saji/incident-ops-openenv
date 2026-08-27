@@ -256,9 +256,24 @@ hardware:
       backend: transformers
       load_in_4bit: false # bf16; bitsandbytes 4-bit is unreliable on ROCm
       num_generations: 16
+    local_rtx3050:        # Local 4 GB laptop GPU — SMOKE TEST profile, not real training
+      backend: unsloth
+      load_in_4bit: true
+      num_generations: 2  # GRPO's minimum, to fit in 4 GB
 ```
 
 All values can also be overridden via environment variables (`GRPO_MAX_STEPS`, `HF_TOKEN`, etc.).
+
+### Smoke-testing on a small local GPU
+
+`local_rtx3050` trims `num_generations` and `max_seq_length` to the minimum the locked
+prompt budget allows, to exercise the full SFT→GRPO code path on a 4 GB card before
+spending Colab/AMD time. It is not a real training target — use a handful of steps:
+
+```bash
+pip install -e ".[train]"
+HARDWARE_PROFILE=local_rtx3050 GRPO_MAX_STEPS=3 python train.py
+```
 
 ### Training on AMD Developer Cloud (MI300X)
 

@@ -109,6 +109,21 @@ hardware:
       num_generations: 16
       per_device_train_batch_size: 8
       gradient_accumulation_steps: 4
+    # Local RTX 3050 laptop GPU (4 GB VRAM) — SMOKE-TEST profile, not a real training
+    # target. Unsloth 4-bit works fine here (real CUDA, unlike ROCm). max_seq_length is
+    # trimmed to the locked minimum (max_prompt_length + max_completion_length = 1056,
+    # rounded up) since 4 GB leaves no headroom; num_generations dropped to GRPO's
+    # minimum of 2. Use with GRPO_MAX_STEPS=3 (or similar) to exercise the code path
+    # end-to-end, not to actually train — expect this to be slow and possibly still OOM
+    # depending on what else is using the GPU. global batch 1*2=2, divisible by
+    # num_generations 2.
+    local_rtx3050:
+      backend: unsloth
+      load_in_4bit: true
+      max_seq_length: 1088
+      num_generations: 2
+      per_device_train_batch_size: 1
+      gradient_accumulation_steps: 2
 
 output:
   dir: "outputs"

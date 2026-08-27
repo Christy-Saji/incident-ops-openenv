@@ -19,10 +19,26 @@ dependencies = [
 [project.optional-dependencies]
 train = [
     "unsloth",
-    "trl>=0.12",
-    "transformers>=4.45",
-    "datasets",
+    # trl<=0.24.0 is unsloth_zoo's own upper bound (it pins the pair together).
+    # transformers is capped below 5.0: trl 0.24.0's availability checks
+    # (is_mergekit_available/is_llm_blender_available) assume transformers'
+    # internal _is_package_available() returns a bare bool, which changed to
+    # always-truthy tuple in transformers 5.x -- trl then unconditionally tries
+    # to import optional extras (mergekit, the abandoned llm-blender) that
+    # aren't installed / don't work, crashing `from trl import GRPOTrainer`.
+    # unsloth_zoo's own metadata claims transformers<=5.5.0 is fine here; it
+    # isn't -- verified by hand. Revisit this pin only after confirming a newer
+    # trl/transformers pair imports cleanly AND unsloth's patches still apply.
+    "trl>=0.18.2,<=0.24.0",
+    "transformers>=4.45,<5.0",
+    # unsloth_zoo also pins datasets away from 4.0.x/4.1.0/>=4.4 -- match it so a
+    # fresh install doesn't silently drift onto a version it declares unsupported.
+    "datasets>=3.4.1,!=4.0.*,!=4.1.0,<4.4.0",
     "torch",
+    # unsloth_zoo's models/_utils.py unconditionally imports unsloth_zoo.vision_utils
+    # (multimodal support code) even for a text-only model load -- it doesn't declare
+    # torchvision as a dependency itself, so it must be installed explicitly here.
+    "torchvision",
     "pandas",
     "matplotlib",
     "numpy",
@@ -31,9 +47,11 @@ train = [
 # No unsloth and no bitsandbytes (both CUDA-oriented); torch is intentionally omitted
 # because the ROCm build ships in the rocm/pytorch-training container / AMD wheel
 # index, not on PyPI — installing plain `torch` here would pull the CUDA build.
+# Same trl/transformers cap as `train` above -- this backend still imports
+# trl.GRPOTrainer via training/pipeline.py, so it hits the identical bug.
 train-amd = [
-    "trl>=0.12",
-    "transformers>=4.45",
+    "trl>=0.18.2,<=0.24.0",
+    "transformers>=4.45,<5.0",
     "peft",
     "accelerate",
     "datasets",

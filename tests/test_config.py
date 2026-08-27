@@ -108,24 +108,36 @@ def test_real_config_amd_profile_is_bf16_transformers(monkeypatch):
     assert global_batch % hw.num_generations == 0
 
 
+def test_real_config_local_profile_is_4bit_unsloth_with_minimal_footprint(monkeypatch):
+    monkeypatch.setenv("HARDWARE_PROFILE", "local_rtx3050")
+    cfg = TrainConfig.from_yaml(REAL_CONFIG)
+    assert cfg.hardware.backend == "unsloth"
+    assert cfg.hardware.load_in_4bit is True
+    assert cfg.hardware.num_generations == 2
+    hw = cfg.hardware
+    global_batch = hw.per_device_train_batch_size * hw.gradient_accumulation_steps
+    assert global_batch % hw.num_generations == 0
+
+
 def test_locked_block_is_independent_of_hardware_profile(monkeypatch):
     """Switching hardware profiles must not change the locked algorithm knobs."""
     colab = TrainConfig.from_yaml(REAL_CONFIG)
-    monkeypatch.setenv("HARDWARE_PROFILE", "amd_mi300x")
-    amd = TrainConfig.from_yaml(REAL_CONFIG)
+    for profile in ("amd_mi300x", "local_rtx3050"):
+        monkeypatch.setenv("HARDWARE_PROFILE", profile)
+        other = TrainConfig.from_yaml(REAL_CONFIG)
 
-    assert colab.model.id == amd.model.id
-    assert colab.model.lora_rank == amd.model.lora_rank
-    assert colab.model.lora_alpha == amd.model.lora_alpha
-    assert colab.model.lora_target_modules == amd.model.lora_target_modules
-    assert colab.training.train_tasks == amd.training.train_tasks
-    assert colab.training.kl_coef == amd.training.kl_coef
-    assert colab.training.max_prompt_length == amd.training.max_prompt_length
+        assert colab.model.id == other.model.id
+        assert colab.model.lora_rank == other.model.lora_rank
+        assert colab.model.lora_alpha == other.model.lora_alpha
+        assert colab.model.lora_target_modules == other.model.lora_target_modules
+        assert colab.training.train_tasks == other.training.train_tasks
+        assert colab.training.kl_coef == other.training.kl_coef
+        assert colab.training.max_prompt_length == other.training.max_prompt_length
 
 
-def test_max_seq_length_fits_prompt_budget_in_both_profiles(monkeypatch):
-    """Both profiles must satisfy the pipeline's prompt-budget assertion."""
-    for profile in ("colab_t4", "amd_mi300x"):
+def test_max_seq_length_fits_prompt_budget_in_all_profiles(monkeypatch):
+    """Every profile must satisfy the pipeline's prompt-budget assertion."""
+    for profile in ("colab_t4", "amd_mi300x", "local_rtx3050"):
         monkeypatch.setenv("HARDWARE_PROFILE", profile)
         cfg = TrainConfig.from_yaml(REAL_CONFIG)
         budget = cfg.training.max_prompt_length + cfg.training.max_completion_length

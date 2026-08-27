@@ -15,6 +15,7 @@ outputs_grpo/
 outputs_sft/
 outputs_sanity/
 trained_sre_agent/
+unsloth_compiled_cache/
 *.pkl
 *.safetensors
 *.bin
