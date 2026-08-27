@@ -86,12 +86,24 @@ training:
 # divisible by num_generations. max_seq_length must be >= max_prompt_length +
 # max_completion_length (asserted in pipeline.py).
 hardware:
-  profile: colab_t4          # active profile: colab_t4 | amd_mi300x
+  profile: colab_t4          # active profile: colab_t4 | kaggle_t4 | amd_mi300x | local_rtx3050
   profiles:
     # Google Colab T4 (16 GB VRAM) — Unsloth 4-bit (bitsandbytes). Model choices on T4:
     #   Qwen2.5-3B (current) ~60-75 min GRPO; 1.5B ~45 min but weaker on hard/network;
     #   7B OOMs at 8 generations. global batch 2*4=8, divisible by num_generations 8.
     colab_t4:
+      backend: unsloth
+      load_in_4bit: true
+      max_seq_length: 1280
+      num_generations: 8
+      per_device_train_batch_size: 2
+      gradient_accumulation_steps: 4
+    # Kaggle Notebooks — GPU T4 x2 or P100 accelerator, both 16 GB VRAM (single-GPU
+    # use; this codebase doesn't do multi-GPU, so a T4 x2 selection just uses GPU 0).
+    # Same VRAM class as Colab's T4, so identical batch/seq/generation settings apply
+    # -- kept as its own named profile (not an alias) so it can diverge later without
+    # touching colab_t4, and so logs/summaries correctly say where it ran.
+    kaggle_t4:
       backend: unsloth
       load_in_4bit: true
       max_seq_length: 1280

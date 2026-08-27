@@ -130,24 +130,26 @@ except ImportError:
     print("  SKIPPED (datasets package not installed locally -- runs in Colab)")
 
 
-# ── 5. colab_training.ipynb is unified onto the shared pipeline ───────────────
-print("5. colab_training.ipynb unified onto training.pipeline")
-with open("colab_training.ipynb", "r", encoding="utf-8") as f:
-    nb = json.load(f)
+# ── 5. every training notebook is unified onto the shared pipeline ────────────
+# Every notebook front-end (Colab, Kaggle, ...) must delegate to training.pipeline.run
+# over config/train.yaml instead of hand-rolling its own SFT/GRPO cell, so no notebook
+# can drift onto its own hyperparameters. Sync is guaranteed by delegation, not by
+# matching inline values.
+for nb_path in ("colab_training.ipynb", "kaggle_training.ipynb"):
+    print(f"5. {nb_path} unified onto training.pipeline")
+    with open(nb_path, "r", encoding="utf-8") as f:
+        nb = json.load(f)
 
-all_src = "\n".join("".join(c["source"]) for c in nb["cells"])
-# The notebook now runs the SAME code path as `python train.py` (training.pipeline.run
-# over config/train.yaml) instead of a hand-rolled SFT/GRPO cell, so Colab and the AMD
-# run cannot drift apart. Sync is guaranteed by delegation, not by matching inline values.
-check("trains via shared pipeline",
-      "from training.pipeline import run" in all_src and "run(cfg)" in all_src)
-check("loads config from YAML", "TrainConfig.from_yaml" in all_src)
-check("selects a hardware profile", "HARDWARE_PROFILE" in all_src)
-# The bespoke GRPOConfig and its divergent hyperparameters are gone — the pipeline
-# owns them now via config/train.yaml.
-check("no hand-rolled GRPOConfig", "GRPOConfig(" not in all_src)
-check("no divergent temperature=1.1", "temperature                 = 1.1" not in all_src)
-check("no divergent beta=0.15", "beta                     = 0.15" not in all_src)
+    all_src = "\n".join("".join(c["source"]) for c in nb["cells"])
+    check("trains via shared pipeline",
+          "from training.pipeline import run" in all_src and "run(cfg)" in all_src)
+    check("loads config from YAML", "TrainConfig.from_yaml" in all_src)
+    check("selects a hardware profile", "HARDWARE_PROFILE" in all_src)
+    # The bespoke GRPOConfig and its divergent hyperparameters are gone — the pipeline
+    # owns them now via config/train.yaml.
+    check("no hand-rolled GRPOConfig", "GRPOConfig(" not in all_src)
+    check("no divergent temperature=1.1", "temperature                 = 1.1" not in all_src)
+    check("no divergent beta=0.15", "beta                     = 0.15" not in all_src)
 
 
 # ── Summary ──────────────────────────────────────────────────────────────────

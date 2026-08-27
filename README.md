@@ -19,7 +19,7 @@ pinned: false
 
 **Live Demo:** [incident-ops-openenv-final](https://huggingface.co/spaces/chritsysajii/incident-ops-openenv-final)  
 **Trained Model:** [sre-agent-llama3-grpo](https://huggingface.co/chritsysajii/sre-agent-llama3-grpo)  
-**Training Notebook:** [colab_training.ipynb](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/master/colab_training.ipynb)
+**Training Notebook:** [colab_training.ipynb](https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/master/colab_training.ipynb) (Google Colab) · [kaggle_training.ipynb](kaggle_training.ipynb) (Kaggle Notebooks)
 
 ---
 
@@ -174,6 +174,17 @@ Open the notebook and run all cells:
 ```
 https://colab.research.google.com/github/Christy-saji/incident-ops-openenv/blob/master/colab_training.ipynb
 ```
+
+### Train on Kaggle Notebooks
+
+Upload [`kaggle_training.ipynb`](kaggle_training.ipynb) (File → Upload Notebook), then
+before running: open Notebook Settings (⋮ menu) → set **Accelerator** to `GPU T4 x2` or
+`GPU P100`, and flip **Internet** to `On`. Run all cells — it clones the repo into
+`/kaggle/working`, installs `pip install -e ".[train]"`, and trains on the `kaggle_t4`
+hardware profile (identical settings to Colab's T4). Unlike Colab, Kaggle has no
+Drive-style persistent mount: use **Save Version → Save & Run All (Commit)** to keep
+`/kaggle/working` past the session, or push the trained model to the HF Hub from the
+notebook's save cell (add an `HF_TOKEN` secret via Add-ons → Secrets first).
 
 Or train locally (requires GPU with CUDA):
 

@@ -108,6 +108,18 @@ def test_real_config_amd_profile_is_bf16_transformers(monkeypatch):
     assert global_batch % hw.num_generations == 0
 
 
+def test_real_config_kaggle_profile_matches_colab_settings(monkeypatch):
+    """Kaggle's T4/P100 is the same 16 GB VRAM class as Colab's T4."""
+    colab = TrainConfig.from_yaml(REAL_CONFIG)  # default profile, no env var set
+    monkeypatch.setenv("HARDWARE_PROFILE", "kaggle_t4")
+    kaggle = TrainConfig.from_yaml(REAL_CONFIG)
+    assert kaggle.hardware.backend == colab.hardware.backend == "unsloth"
+    assert kaggle.hardware.load_in_4bit is True
+    hw = kaggle.hardware
+    global_batch = hw.per_device_train_batch_size * hw.gradient_accumulation_steps
+    assert global_batch % hw.num_generations == 0
+
+
 def test_real_config_local_profile_is_4bit_unsloth_with_minimal_footprint(monkeypatch):
     monkeypatch.setenv("HARDWARE_PROFILE", "local_rtx3050")
     cfg = TrainConfig.from_yaml(REAL_CONFIG)
@@ -122,7 +134,7 @@ def test_real_config_local_profile_is_4bit_unsloth_with_minimal_footprint(monkey
 def test_locked_block_is_independent_of_hardware_profile(monkeypatch):
     """Switching hardware profiles must not change the locked algorithm knobs."""
     colab = TrainConfig.from_yaml(REAL_CONFIG)
-    for profile in ("amd_mi300x", "local_rtx3050"):
+    for profile in ("kaggle_t4", "amd_mi300x", "local_rtx3050"):
         monkeypatch.setenv("HARDWARE_PROFILE", profile)
         other = TrainConfig.from_yaml(REAL_CONFIG)
 
@@ -137,7 +149,7 @@ def test_locked_block_is_independent_of_hardware_profile(monkeypatch):
 
 def test_max_seq_length_fits_prompt_budget_in_all_profiles(monkeypatch):
     """Every profile must satisfy the pipeline's prompt-budget assertion."""
-    for profile in ("colab_t4", "amd_mi300x", "local_rtx3050"):
+    for profile in ("colab_t4", "kaggle_t4", "amd_mi300x", "local_rtx3050"):
         monkeypatch.setenv("HARDWARE_PROFILE", profile)
         cfg = TrainConfig.from_yaml(REAL_CONFIG)
         budget = cfg.training.max_prompt_length + cfg.training.max_completion_length
