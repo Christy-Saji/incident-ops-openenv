@@ -107,6 +107,56 @@ class TestFormatReward:
         rewards = format_reward_func(prompts, completions)
         assert rewards[0] < 0
 
+    @pytest.mark.parametrize("text", [
+        "inspect_deploy_history",
+        "  inspect_deploy_history\n",
+        "`inspect_deploy_history`",
+        "**inspect_deploy_history**",
+        "inspect_deploy_history.",
+    ])
+    def test_bare_action_scores_ceiling(self, text):
+        """Surrounding decoration still counts as a bare answer."""
+        prompts = [_make_prompt("easy")]
+        completions = [[{"role": "assistant", "content": text}]]
+        assert format_reward_func(prompts, completions)[0] == pytest.approx(0.1)
+
+    @pytest.mark.parametrize("text", [
+        "Action: inspect_deploy_history",
+        "I would inspect_deploy_history because the error rate spiked",
+        "Let me think. First inspect_deploy_history, then roll back.",
+    ])
+    def test_padded_action_scores_between(self, text):
+        """A valid action buried in prose must rank below a bare one.
+
+        The earlier two-tier version paid these the same +0.1 as a clean
+        answer, so nothing in the reward stack ever penalised length — and
+        from ~step 320 of the first full GRPO run the policy rambled until
+        every rollout hit max_completion_length without emitting EOS.
+        """
+        prompts = [_make_prompt("easy")]
+        completions = [[{"role": "assistant", "content": text}]]
+        reward = format_reward_func(prompts, completions)[0]
+        assert reward == pytest.approx(0.0)
+        assert reward < 0.1
+
+    def test_varies_within_a_group(self):
+        """Must not be constant across a group, or GRPO's baseline cancels it.
+
+        The advantage is (r_i - group_mean) / group_std, so a reward that is
+        uniform across a group contributes exactly zero to every gradient in
+        it. The two-tier version logged mean 0.100000 / std 0.000000 on ~90%
+        of training steps — it was decorative.
+        """
+        prompts = [_make_prompt("easy")] * 3
+        completions = [
+            [{"role": "assistant", "content": "inspect_deploy_history"}],
+            [{"role": "assistant", "content": "Action: inspect_deploy_history"}],
+            [{"role": "assistant", "content": "no idea what to do here"}],
+        ]
+        rewards = format_reward_func(prompts, completions)
+        assert rewards == [pytest.approx(0.1), pytest.approx(0.0), pytest.approx(-0.4)]
+        assert len(set(rewards)) == 3
+
 
 # ---------------------------------------------------------------------------
 # anti_cheat_reward_func

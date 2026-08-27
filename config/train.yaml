@@ -55,9 +55,16 @@ training:
 
   # Optimiser
   learning_rate: 0.00005     # 5e-5 — LoRA LR. Was 1e-5, which is a full-finetune LR.
-  # KL penalty against the SFT reference. Was 0.04, which anchored the policy to a
-  # reference that already answers every training prompt optimally — no room to move.
-  kl_coef: 0.005
+  # KL penalty against the SFT reference (TRL's `beta`). Bracketed from both sides
+  # now: 0.04 anchored the policy to a reference that already answers every training
+  # prompt optimally (no room to move), but 0.005 under-anchored just as badly. The
+  # first full 500-step run logged sustained KL of 1-4 nats with spikes to 7.1, 10.9
+  # and 13.3 — at beta=0.005 that is a penalty of at most 0.065, a rounding error
+  # against a reward whose entire range is 0.5 wide, so nothing was restraining the
+  # policy. It drifted off the SFT reference's clean single-token output into
+  # rambling: from ~step 320 completion length climbed until every rollout hit
+  # max_completion_length with mean_terminated_length 0.0 (i.e. never emitting EOS).
+  kl_coef: 0.02
   lr_scheduler_type: "cosine"
   warmup_steps: 8
   max_grad_norm: 0.3
@@ -85,19 +92,33 @@ training:
 # (per_device_train_batch_size * gradient_accumulation_steps * num_gpus) must be
 # divisible by num_generations. max_seq_length must be >= max_prompt_length +
 # max_completion_length (asserted in pipeline.py).
+#
+# READ THE QUOTIENT, NOT JUST THE REMAINDER: global_batch / num_generations is the
+# number of distinct PROMPTS behind each optimiser step. At 2*4=8 with 8
+# generations that quotient was 1 — every gradient step in the first full run was
+# estimated from eight rollouts of a single state, which is about as noisy as GRPO
+# gets, and ~31 of the first 250 steps logged reward_std 0.000000 (all eight
+# rollouts identical → zero advantage → the step contributed nothing at all).
 hardware:
   profile: colab_t4          # active profile: colab_t4 | kaggle_t4 | amd_mi300x | local_rtx3050
   profiles:
     # Google Colab T4 (16 GB VRAM) — Unsloth 4-bit (bitsandbytes). Model choices on T4:
     #   Qwen2.5-3B (current) ~60-75 min GRPO; 1.5B ~45 min but weaker on hard/network;
     #   7B OOMs at 8 generations. global batch 2*4=8, divisible by num_generations 8.
+    # gradient_accumulation_steps was 4 (global batch 8 / 8 generations = 1 prompt
+    # per optimiser step). At 8 the quotient is 2. This is pure accumulation, so
+    # peak VRAM is unchanged, but wall-clock per step roughly doubles: the 500-step
+    # run that took 1h42m becomes ~3h25m. If a session budget won't take that, the
+    # alternative that keeps the old wall-clock is num_generations 8 → 4 (global
+    # batch 8 / 4 = 2 prompts per step, same total rollouts) at the cost of a
+    # noisier group-mean baseline. Prefer this one while the budget allows it.
     colab_t4:
       backend: unsloth
       load_in_4bit: true
       max_seq_length: 1280
       num_generations: 8
       per_device_train_batch_size: 2
-      gradient_accumulation_steps: 4
+      gradient_accumulation_steps: 8
     # Kaggle Notebooks — GPU T4 x2 accelerator, 16 GB VRAM (single-GPU use; this
     # codebase doesn't do multi-GPU, so a T4 x2 selection just uses GPU 0). NOT P100:
     # its sm_60 compute capability is below what the pinned PyTorch/Unsloth build ships
@@ -111,8 +132,10 @@ hardware:
       load_in_4bit: true
       max_seq_length: 1280
       num_generations: 8
+      # 2 prompts per optimiser step — see the colab_t4 note above for the
+      # wall-clock trade and the cheaper num_generations alternative.
       per_device_train_batch_size: 2
-      gradient_accumulation_steps: 4
+      gradient_accumulation_steps: 8
     # AMD Developer Cloud — single MI300X (192 GB HBM3, 20 vCPU, 240 GB RAM) in the
     # rocm/pytorch-training container. Stock transformers + peft + TRL in bf16 (no
     # Unsloth, no bitsandbytes). 192 GB is ~12x a T4, so rollouts and batch scale up.

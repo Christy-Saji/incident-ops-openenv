@@ -52,7 +52,7 @@ incident-ops-openenv/
 ├── training/                 # Training package (extracted from monolithic train.py)
 │   ├── config.py             # TrainConfig dataclass + YAML loader
 │   ├── qstar.py               # Exact Q* solver (BFS + backward induction / beam fallback)
-│   ├── reward_functions.py   # format + qstar + diversity (+ 7 retired LEGACY_REWARD_FUNCTIONS)
+│   ├── reward_functions.py   # format + qstar (+ retired diversity, 7 LEGACY_REWARD_FUNCTIONS)
 │   ├── dataset.py            # SFT dataset + eps-greedy GRPO dataset, train/eval task split
 │   ├── prompting.py          # SYSTEM_PROMPT + build_prompt (shared by train/eval/compare)
 │   ├── callbacks.py          # RewardLoggerCallback + WandbRewardCallback
@@ -111,13 +111,28 @@ The scenarios are heterogeneous by design — a repeated diagnostic pattern does
 
 ## Reward System
 
-GRPO training uses 3 reward signals (`training/reward_functions.py::ALL_REWARD_FUNCTIONS`):
+GRPO training uses 2 reward signals (`training/reward_functions.py::ALL_REWARD_FUNCTIONS`):
 
-| Signal | Purpose |
-|--------|---------|
-| `format_reward` | Valid action string check |
-| `qstar_reward` | **Primary signal.** `Q*(s,a) - max_a' Q*(s,a')` |
-| `diversity_reward` | Penalise duplicate actions within a GRPO group |
+| Signal | Range | Purpose |
+|--------|-------|---------|
+| `format_reward` | `-0.4 … +0.1` | Is the completion a *bare* valid action? (`+0.1` bare / `0.0` buried in prose / `-0.4` no valid action) |
+| `qstar_reward` | `-1.0 … 0.0` | **Primary signal.** `Q*(s,a) - max_a' Q*(s,a')` |
+
+### Reading the reward curve
+
+**The stack's ceiling is `+0.1`, so a healthy run's logged reward is negative
+and rising toward `+0.1`.** `qstar_reward` is `≤ 0` by construction and exactly
+`0.0` on any action lying on a score-maximising path, so a perfect policy scores
+`0.1 + 0.0`. A negative mean reward is not by itself evidence of a failed run.
+
+The column that measures policy quality is `rewards/qstar_reward_func/mean`,
+whose target is `0.0`. Two other columns matter as much as the reward:
+
+- `reward_std` — `0.000000` means every rollout in the group scored identically,
+  so the advantage is zero and that step trained on nothing.
+- `clipped_ratio` / `mean_terminated_length` — a rising `clipped_ratio` with
+  `mean_terminated_length` falling to `0.0` means the policy has stopped
+  emitting EOS and is rambling to the token cap. Raise `kl_coef` if so.
 
 `qstar_reward` is exact Q\* over the environment's finite, deterministic state
 space (`training/qstar.py`): the best final `compute_score` reachable after
@@ -135,11 +150,25 @@ with the optimal action on roughly half of all training states — GRPO cannot
 learn a policy where the reward and the grader disagree, no matter how long you
 train.
 
-`diversity_reward` is scored **per completion** (each one penalised by how many
-siblings duplicate it), not per group. A reward that assigns the same value to
-every completion in a group is cancelled exactly by GRPO's group-mean baseline
-and cannot influence a single gradient — which is what the earlier group-uniform
-version did.
+A third signal, `diversity_reward`, was in this stack for the first full
+500-step run and has since been **retired**. It penalised each completion by how
+many siblings duplicated it, which pays for entropy without reference to
+correctness: a group of 8 rollouts unanimously playing the Q\*-optimal action
+scored `0.1 + 0.0 - 0.5 = -0.4`, while a group spread over 8 mostly-wrong
+actions scored about `-0.1`. Perfect play, ranked last. Over that run the total
+reward improved from ≈ `-0.46` to ≈ `-0.16`, but `qstar_reward` — the only term
+that measures policy quality — moved just `-0.21 → -0.155`: roughly 70% of the
+apparent progress was the model learning to sample more randomly.
+
+Every reward in the active stack must therefore be **strictly per-completion** —
+a completion's score may not depend on its siblings. `tests/test_reward_ranking.py
+::test_rewards_are_independent_of_sibling_completions` asserts exactly that,
+because the module's other ranking tests score a batch of 19 *distinct* actions
+and are structurally blind to a group-relative reward.
+
+Mode collapse is still worth watching; the remedies are sampling temperature,
+`num_generations`, and the eps-greedy state spread, plus the `reward_std` column
+logged by `RewardLoggerCallback` — not a reward that pays for disagreement.
 
 The environment scoring (`compute_score`) uses 5 weighted components: diagnosis
 quality, mitigation completion, recovery, communication, and efficiency.
@@ -264,7 +293,7 @@ training:
   eval_tasks: ["memory_leak", "disk_full"]             # held out of both entirely
   max_prompt_length: 1024 # prompts are ~700 tok median; at 512 TRL left-truncated them
   learning_rate: 0.00005  # 5e-5 — a LoRA LR, not a full-finetune one
-  kl_coef: 0.005          # KL vs the SFT reference; 0.04 anchored the policy in place
+  kl_coef: 0.02           # KL vs the SFT reference; 0.04 anchored it, 0.005 let it ramble
 
 # HARDWARE PROFILE — deferred (backend + device + precision)
 hardware:
@@ -274,6 +303,8 @@ hardware:
       backend: unsloth
       load_in_4bit: true
       num_generations: 8
+      per_device_train_batch_size: 2
+      gradient_accumulation_steps: 8   # global batch 16 / 8 gens = 2 prompts per step
     amd_mi300x:           # AMD Developer Cloud MI300X (192 GB) — transformers+peft / ROCm
       backend: transformers
       load_in_4bit: false # bf16; bitsandbytes 4-bit is unreliable on ROCm

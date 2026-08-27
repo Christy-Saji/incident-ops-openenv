@@ -87,6 +87,16 @@ def score_all_actions(state: dict, reward_funcs=None) -> dict[str, float]:
 
     Scores all 19 actions as a single batch per reward function, exactly as
     GRPOTrainer would call them, and sums across the stack.
+
+    NOTE — the batch here is 19 DISTINCT actions, which is what makes every
+    ranking test in this module blind to a group-relative reward: such a reward
+    sees no duplicates, returns the same constant for all 19, and shifts every
+    total equally without ever changing the argmax. That is not hypothetical.
+    diversity_reward_func was exactly that shape and shipped in
+    ALL_REWARD_FUNCTIONS through a full 500-step GRPO run without a single test
+    in this file going red, while in real training it was ranking a unanimously
+    Q*-optimal group below a diverse wrong one. test_rewards_are_independent_of
+    _sibling_completions below is the guard for that class of bug; keep it.
     """
     reward_funcs = ALL_REWARD_FUNCTIONS if reward_funcs is None else reward_funcs
     prompts = [build_prompt(state)] * len(VALID_ACTIONS)
@@ -149,6 +159,44 @@ def test_reward_argmax_matches_optimal_action(stack_name):
         f"[{stack_name}] reward argmax matches Q*-optimal action: {matches}/{total} states. "
         f"Mismatches: {detail}{more}"
     )
+
+
+@pytest.mark.parametrize("stack_name", sorted(REWARD_STACKS))
+def test_rewards_are_independent_of_sibling_completions(stack_name):
+    """A completion's reward must not depend on the other completions beside it.
+
+    Every ranking test in this module scores one batch of 19 distinct actions,
+    so a reward that scores completion i by how many of its siblings match it
+    is a constant across that batch and cannot move the argmax — it is
+    invisible here no matter how badly it behaves in training.
+
+    diversity_reward_func was that reward. It returns 0.0 for a completion that
+    is unique in its group and -0.5 for one duplicated throughout it, so a GRPO
+    group that unanimously played the Q*-optimal action scored
+    0.1 + 0.0 - 0.5 = -0.4 while a group spread over eight mostly-wrong actions
+    scored about -0.1. Perfect play, ranked last. It survived a full 500-step
+    run in ALL_REWARD_FUNCTIONS with this file green throughout.
+
+    The property asserted here is the one the ranking tests silently assume:
+    scoring an action alone must equal scoring it among identical siblings.
+    Any future group-relative reward fails this immediately.
+    """
+    for ts in iter_training_states():
+        prompt = build_prompt(ts.state)
+        completion = [{"role": "assistant", "content": ts.expected_action}]
+
+        for reward_func in REWARD_STACKS[stack_name]:
+            solo = reward_func([prompt], [completion])[0]
+            collapsed = reward_func([prompt] * 8, [completion] * 8)
+
+            assert all(v == pytest.approx(solo) for v in collapsed), (
+                f"[{stack_name}] {reward_func.__name__} is group-relative: "
+                f"scoring {ts.expected_action!r} alone gives {solo}, but scoring "
+                f"it among 8 identical siblings gives {collapsed}. A reward that "
+                f"reads its siblings cannot be ranked by this module's other "
+                f"tests (they use a batch of 19 distinct actions) and, if it "
+                f"penalises agreement, it ranks unanimous optimal play last."
+            )
 
 
 @pytest.mark.parametrize("stack_name", sorted(REWARD_STACKS))
