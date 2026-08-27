@@ -27,6 +27,20 @@ train = [
     "matplotlib",
     "numpy",
 ]
+# AMD Developer Cloud / ROCm (MI300X) provision — hardware.backend: transformers.
+# No unsloth and no bitsandbytes (both CUDA-oriented); torch is intentionally omitted
+# because the ROCm build ships in the rocm/pytorch-training container / AMD wheel
+# index, not on PyPI — installing plain `torch` here would pull the CUDA build.
+train-amd = [
+    "trl>=0.12",
+    "transformers>=4.45",
+    "peft",
+    "accelerate",
+    "datasets",
+    "pandas",
+    "matplotlib",
+    "numpy",
+]
 eval = [
     "scipy",
     "pandas",

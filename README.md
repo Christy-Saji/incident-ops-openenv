@@ -221,30 +221,61 @@ docker run --rm -p 7860:7860 incident-ops-openenv
 
 Edit [`config/train.yaml`](config/train.yaml) to change any hyperparameter. Key settings:
 
+The config is split into a **locked** algorithm half (`model:`, `training:`) and a
+**deferred** hardware half (`hardware:`). Which backend loads the model, where it
+runs, and 4-bit vs bf16 are one coupled decision, held in named `hardware.profiles`:
+switch provisions with the `profile:` selector (or the `HARDWARE_PROFILE` env var)
+and nothing in the locked half moves. The [backend seam](training/backend.py)
+dispatches on each profile's `backend`.
+
 ```yaml
+# LOCKED — algorithm knobs
 model:
   id: "unsloth/Qwen2.5-3B-Instruct"
   lora_rank: 32
   lora_alpha: 64          # alpha = 2*rank; at 16 the LoRA update was scaled by 0.5
-  max_seq_length: 1280    # must fit max_prompt_length + max_completion_length
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
 training:
   grpo_max_steps: 500
   train_tasks: ["easy", "medium", "hard", "network"]  # held-in for SFT + GRPO
   eval_tasks: ["memory_leak", "disk_full"]             # held out of both entirely
-  epsilon: 0.3             # eps-greedy off-Q*-path action probability (training/dataset.py)
-  n_states: 1000           # target unique GRPO prompts
-  num_generations: 8
   max_prompt_length: 1024 # prompts are ~700 tok median; at 512 TRL left-truncated them
   learning_rate: 0.00005  # 5e-5 — a LoRA LR, not a full-finetune one
   kl_coef: 0.005          # KL vs the SFT reference; 0.04 anchored the policy in place
-  save_steps: 50          # checkpoint every 50 steps (resume if Colab disconnects)
 
-wandb:
-  enabled: false          # set to true + add WANDB_API_KEY to Colab secrets
+# HARDWARE PROFILE — deferred (backend + device + precision)
+hardware:
+  profile: colab_t4       # colab_t4 | amd_mi300x — or set HARDWARE_PROFILE
+  profiles:
+    colab_t4:             # Google Colab T4 (16 GB) — Unsloth 4-bit / CUDA
+      backend: unsloth
+      load_in_4bit: true
+      num_generations: 8
+    amd_mi300x:           # AMD Developer Cloud MI300X (192 GB) — transformers+peft / ROCm
+      backend: transformers
+      load_in_4bit: false # bf16; bitsandbytes 4-bit is unreliable on ROCm
+      num_generations: 16
 ```
 
 All values can also be overridden via environment variables (`GRPO_MAX_STEPS`, `HF_TOKEN`, etc.).
+
+### Training on AMD Developer Cloud (MI300X)
+
+The AMD provision runs on a single **MI300X** (192 GB HBM3) in the
+`rocm/pytorch-training` container — no Unsloth, no bitsandbytes; stock
+`transformers` + `peft` + TRL in bf16.
+
+```bash
+# In the ROCm container (torch is already the ROCm build — do NOT pip install torch):
+pip install -e ".[train-amd]"
+HARDWARE_PROFILE=amd_mi300x python train.py
+```
+
+The saved model directory is a plain merged HF model, so the trained-model → eval
+handoff ([`scripts/evaluate.py`](scripts/evaluate.py), [`server/inference.py`](server/inference.py))
+is identical to the Colab path. The AMD Developer Program grants $100 of credits that
+expire 30 days after activation — one GRPO run is well inside that budget.
 
 `training/pipeline.py` asserts at startup that the longest training prompt fits
 inside `max_prompt_length` and raises if it does not — TRL left-truncates

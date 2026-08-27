@@ -139,3 +139,5 @@ dataset generation). `test_reward_ranking.py` hard-asserts the reward stack rank
 action first in every training state — this is a structural property of `qstar_reward_func`
 (reward *is* the grader, maximised), not something tuned toward, so a regression here means the
 bug is in `training/qstar.py` or in how a reward stack composes it, not in the test.
+
+When making multiple related code changes, do not run tests after each individual edit. Batch all planned changes first, then run the full test suite once at the end. Only run a targeted test immediately if a change is high-risk or isolated.

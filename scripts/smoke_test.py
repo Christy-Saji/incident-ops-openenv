@@ -130,20 +130,24 @@ except ImportError:
     print("  SKIPPED (datasets package not installed locally -- runs in Colab)")
 
 
-# ── 5. notebook cell 15 content ──────────────────────────────────────────────
-print("5. colab_training.ipynb cell 15")
+# ── 5. colab_training.ipynb is unified onto the shared pipeline ───────────────
+print("5. colab_training.ipynb unified onto training.pipeline")
 with open("colab_training.ipynb", "r", encoding="utf-8") as f:
     nb = json.load(f)
 
-cell15 = "".join(nb["cells"][15]["source"])
-# The 3-function subset is now named in training/reward_functions.py rather than
-# spelled out inline, so the notebook and the tests share one definition.
-check("CORE_REWARD_FUNCTIONS import present", "CORE_REWARD_FUNCTIONS" in cell15)
-check("prompt-budget guard present", "Prompt budget exceeded" in cell15)
-check("ALL_REWARD_FUNCTIONS removed", "ALL_REWARD_FUNCTIONS" not in cell15)
-check("temperature=1.1", "temperature                 = 1.1" in cell15)
-check("beta=0.15", "beta                     = 0.15" in cell15)
-check("diag logger present", "_diag_log" in cell15)
+all_src = "\n".join("".join(c["source"]) for c in nb["cells"])
+# The notebook now runs the SAME code path as `python train.py` (training.pipeline.run
+# over config/train.yaml) instead of a hand-rolled SFT/GRPO cell, so Colab and the AMD
+# run cannot drift apart. Sync is guaranteed by delegation, not by matching inline values.
+check("trains via shared pipeline",
+      "from training.pipeline import run" in all_src and "run(cfg)" in all_src)
+check("loads config from YAML", "TrainConfig.from_yaml" in all_src)
+check("selects a hardware profile", "HARDWARE_PROFILE" in all_src)
+# The bespoke GRPOConfig and its divergent hyperparameters are gone — the pipeline
+# owns them now via config/train.yaml.
+check("no hand-rolled GRPOConfig", "GRPOConfig(" not in all_src)
+check("no divergent temperature=1.1", "temperature                 = 1.1" not in all_src)
+check("no divergent beta=0.15", "beta                     = 0.15" not in all_src)
 
 
 # ── Summary ──────────────────────────────────────────────────────────────────
